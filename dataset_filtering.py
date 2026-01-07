@@ -56,12 +56,8 @@ def convert_to_dict_filtered():
     df_filtered = filter_dataset(df)
     print(f"Nombre de lignes filtrées: {len(df_filtered)}")
     print(f"Nombre de lignes supprimées: {len(df) - len(df_filtered)}")
-    # dict_filtered = df_filtered.to_dict()
-    data = []
-    for index, row in df_filtered.iterrows():
-        dict_filtered = row.to_dict()
-        data.append(Point(**dict_filtered))
-    return data
+
+    return df_filtered
 
 convert_to_dict_filtered()
 
