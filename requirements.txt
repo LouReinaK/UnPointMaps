@@ -1,9 +1,9 @@
 folium
-pandas
+pandas>=2.1.1
 nltk
 scikit-learn
 wordcloud
 mlxtend
 pytest
 matplotlib==3.7.1
-numpy==1.24.3
+numpy>=1.26.0
