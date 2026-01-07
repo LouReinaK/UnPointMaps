@@ -5,3 +5,7 @@ scikit-learn
 wordcloud
 mlxtend
 pytest
+python-dotenv>=1.0.0
+requests>=2.31.0
+tenacity>=8.2.0
+pydantic>=2.0.0
