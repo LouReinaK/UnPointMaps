@@ -30,6 +30,11 @@ env/
 ENV/
 .venv
 
+# Environment files
+.env
+*.env
+.env*
+
 # IDEs
 .vscode/
 .idea/
