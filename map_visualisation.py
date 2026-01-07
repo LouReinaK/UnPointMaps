@@ -5,41 +5,42 @@ from models import Point
 
 # Trinome 3
 
-# Sample data (replace with your CSV)
-geo_url = "https://raw.githubusercontent.com/datasets/geo-countries/master/data/countries.geojson"
-
 
 class Visualisation:
-    def __init__(self, points):
-        self.data = points
+    def __init__(self):
         self.clusters = []
         self.markers = []
 
-    def draw_cluster(self, shape):
-        self.clusters.append(shape)
+    def draw_cluster(self, points, **kwargs):
+        kwargs = kwargs | {
+            "color": "blue",
+            "fill": True,
+            "fill_color": "blue",
+            "popup": "Shape around Paris",
+        }
 
-        # folium.Choropleth(
-        #     geo_data=geo_url,
-        #     data=self.data,
-        #     columns=["Country", "Value"],
-        #     key_on="feature.properties.name",
-        #     fill_color="RdYlGn_r",
-        #     fill_opacity=0.7,
-        #     line_opacity=0.2,
-        #     legend_name="Sample Values"
-        # ).add_to(m)
+        self.clusters.append(folium.Polygon(locations=points, **kwargs))
 
-    def draw_point(self, point):
+    def draw_point(self, point, **kwargs):
+        kwargs = kwargs | {"popup": point.name, "tooltip": f"Tooltip: {point.name}"}
+
         self.markers.append(
-            folium.Marker(
-                location=[point.latitude, point.longitude],
-                popup=point.name,
-                tooltip=f"Tooltip: {point.name}",
-            )
+            folium.Marker(location=[point.latitude, point.longitude], **kwargs)
         )
 
     def create_map(self, output_file="map.html"):
-        m = folium.Map(location=[30, 10], zoom_start=3)
+        center_point = (
+            [
+                sum(p.location[0] for p in self.markers) / len(self.markers),
+                sum(p.location[1] for p in self.markers) / len(self.markers),
+            ]
+            if self.markers
+            else [46.8131, 1.6910]
+        )
+
+        zoom_start = 12
+
+        m = folium.Map(location=center_point, zoom_start=zoom_start)
         if self.clusters:
             for cluster in self.clusters:
                 cluster.add_to(m)
@@ -57,26 +58,20 @@ if __name__ == "__main__":
     # Sample data points
     points = [
         Point(name="Point A", latitude=48.8566, longitude=2.3522),  # Paris
-        Point(name="Point B", latitude=34.0522, longitude=-118.2437),  # Los Angeles
+        # Point(name="Point B", latitude=34.0522, longitude=-118.2437),  # Los Angeles
     ]
 
     # Sample shape data
     shape_data = [
-        folium.Polygon(
-            locations=[
-                [48.85, 2.35],
-                [48.86, 2.36],
-                [48.87, 2.35],
-                [48.86, 2.34],
-            ],
-            color="blue",
-            fill=True,
-            fill_color="blue",
-            popup="Shape around Paris",
-        )
+        [
+            [48.85, 2.35],
+            [48.86, 2.36],
+            [48.87, 2.35],
+            [48.86, 2.34],
+        ]
     ]
 
-    vis = Visualisation(points)
+    vis = Visualisation()
     for point in points:
         vis.draw_point(point)
 
