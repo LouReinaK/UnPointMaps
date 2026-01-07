@@ -1,4 +1,3 @@
-#encoding,données vides, vérifier format date, coordonnées hors de lyon, doublons toute la ligne 
 import pandas as pd
 from datetime import datetime
 from models import Point
