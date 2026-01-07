@@ -8,12 +8,13 @@ import matplotlib.pyplot as plt
 from typing import List, Tuple
 
 
-def load_dataset(points) -> np.ndarray:
+def load_dataset() -> np.ndarray:
     """
         Convertit une liste de points en tableau numpy (lat, long)
     """
     points = convert_to_dict_filtered()
-    return np.array([[p.lat, p.long] for p in points])
+    points_array = points[['latitude', 'longitude']].values
+    return points_array
 
 
 def find_optimal_k_elbow(dataset: np.ndarray, k_range: range = range(2, 11)) -> int:
@@ -89,12 +90,21 @@ def kmeans_clustering(dataset: any, k: int = None,
 
 if __name__ == "__main__":
     # Exemple d'utilisation
+
+    # test aléatoire
     # fixe la seed pour la reproductibilité
-    np.random.seed(42)
+    np.random.seed(54)
     # Génère des points aléatoires
-    sample_points = np.array([[np.random.uniform(-90, 90), np.random.uniform(-180, 180)] for _ in range(100)])
+    # sample_points = np.random.rand(100, 2) * 100
     
-    clustered_points, used_k = kmeans_clustering(sample_points)
-    print(f"Clustering effectué avec k={used_k}")
-    for p in clustered_points[:20]:  # Affiche les 20 premiers points clusterisés
-        print(f"Point({p[0]}, {p[1]}) -> Cluster {p.cluster}")
+    # clusters, optimal_k = kmeans_clustering(sample_points, method="elbow")
+    # print(f"Optimal k found: {optimal_k}")
+    # for idx, cluster in enumerate(clusters):
+    #     print(f"Cluster {idx}: {len(cluster)} points")
+
+    # test avec les données de Flickr
+    flickr_points = load_dataset()
+    clusters, optimal_k = kmeans_clustering(flickr_points, method="elbow")
+    print(f"Optimal k found for Flickr data: {optimal_k}")
+    for idx, cluster in enumerate(clusters):
+        print(f"Cluster {idx}: {len(cluster)} points")

@@ -3,6 +3,8 @@ from datetime import datetime
 
 
 def filter_dataset(df):
+    print("==== Filtrage du dataset ====")
+    print(f"Nombre initial de lignes: {len(df)}")
     # Créer une copie pour éviter les avertissements
     df = df.copy()
     len_initial = len(df)
@@ -53,9 +55,10 @@ def load_and_prepare_data():
 def convert_to_dict_filtered():
     df=load_and_prepare_data()
     df_filtered = filter_dataset(df)
-    print(f"Nombre de lignes filtrées: {len(df_filtered)}")
-    print(f"Nombre de lignes supprimées: {len(df) - len(df_filtered)}")
+    print(f"Nombre de lignes conservées: {len(df_filtered)}")
+    print(f"Nombre de lignes supprimées: {len(df) - len(df_filtered)} \n")
 
     return df_filtered
 
-# convert_to_dict_filtered()
+if __name__ == "__main__":
+    convert_to_dict_filtered()
