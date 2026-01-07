@@ -63,15 +63,14 @@ class Visualisation:
     def draw_cluster_hull(self, points, **kwargs):
         """
         Computes and draws the convex hull for a given set of points.
-        points: List of [lat, lon] or Point objects
+        points: List of [lat, lon] or dicts or pandas Series
         """
         coords = []
         for p in points:
-            if isinstance(p, Point):
-                if hasattr(p, 'latitude') and hasattr(p, 'longitude'):
-                    coords.append([p.latitude, p.longitude])
-                elif hasattr(p, 'lat') and hasattr(p, 'long'):
-                    coords.append([p.lat, p.long])
+            if isinstance(p, (pd.Series, dict)):
+                lat = p.get('latitude') if isinstance(p, dict) else p['latitude']
+                lon = p.get('longitude') if isinstance(p, dict) else p['longitude']
+                coords.append([lat, lon])
             else:
                 coords.append(p)
 
@@ -82,10 +81,28 @@ class Visualisation:
         self.draw_cluster(hull_points, **kwargs)
 
     def draw_point(self, point, **kwargs):
-        kwargs = kwargs | {"popup": point.name, "tooltip": f"Tooltip: {point.name}"}
+        if isinstance(point, (pd.Series, dict)):
+            latitude = point['latitude']
+            longitude = point['longitude']
+            name = point.get('title', point.get('name', 'Unknown'))
+        else:
+            try:
+                # Try to unpack as list/tuple
+                latitude, longitude = point
+                name = "Unknown"
+            except (ValueError, TypeError):
+                 # Fallback if it's an object with attributes (like the old Point, or similar)
+                 if hasattr(point, 'latitude') and hasattr(point, 'longitude'):
+                     latitude = point.latitude
+                     longitude = point.longitude
+                     name = getattr(point, 'title', getattr(point, 'name', 'Unknown'))
+                 else:
+                     raise TypeError(f"Cannot interpret point: {point}")
+
+        kwargs = kwargs | {"popup": name, "tooltip": f"Tooltip: {name}"}
 
         self.markers.append(
-            folium.Marker(location=[point.latitude, point.longitude], **kwargs)
+            folium.Marker(location=[latitude, longitude], **kwargs)
         )
 
     def create_map(self, output_file="map.html"):
@@ -95,30 +112,34 @@ class Visualisation:
                 sum(p.location[1] for p in self.markers) / len(self.markers),
             ]
             if self.markers
-            else [46.8131, 1.6910]
+            else [45.767328, 4.833362]
         )
 
         zoom_start = 12
 
         m = folium.Map(location=center_point, zoom_start=zoom_start)
+        print('Map initialized.')
+
         if self.clusters:
+            print(f"Adding {len(self.clusters)} clusters to map...")
             for cluster in self.clusters:
                 cluster.add_to(m)
 
-        if self.markers:
-            for marker in self.markers:
-                marker.add_to(m)
+        # if self.markers:
+        #     print(f"Adding {len(self.markers)} markers to map...")
+        #     for marker in self.markers:
+        #         marker.add_to(m)
 
         folium.LayerControl().add_to(m)
 
+        print(f"Saving map to {output_file}...")
         m.save(output_file)
 
 
 if __name__ == "__main__":
     # Sample data points
     points = [
-        Point(name="Point A", latitude=48.8566, longitude=2.3522),  # Paris
-        # Point(name="Point B", latitude=34.0522, longitude=-118.2437),  # Los Angeles
+        [48.8566, 2.3522],  # Paris
     ]
 
     # Sample shape data

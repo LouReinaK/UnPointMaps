@@ -1,5 +1,4 @@
 # service de clustering de points dans un espace 2D
-# les points sont représentés par des objets de la classe Point et on utilisera les propriétés Point.lat et Point.long
 # dans un premier temps on implémentera un k-means avec la distance euclidienne et on cherchera le meilleur k
 import numpy as np
 from dataset_filtering import convert_to_dict_filtered
@@ -87,17 +86,15 @@ def kmeans_clustering(dataset: any, k: int = None,
         clusters[label].append(points_array[i].tolist())
         
     return clusters, k
-    
-    return points, k
 
 if __name__ == "__main__":
     # Exemple d'utilisation
     # fixe la seed pour la reproductibilité
     np.random.seed(42)
     # Génère des points aléatoires
-    sample_points = np.array([Point(lat=np.random.uniform(-90, 90), long=np.random.uniform(-180, 180)) for _ in range(100)])
+    sample_points = np.array([[np.random.uniform(-90, 90), np.random.uniform(-180, 180)] for _ in range(100)])
     
     clustered_points, used_k = kmeans_clustering(sample_points)
     print(f"Clustering effectué avec k={used_k}")
     for p in clustered_points[:20]:  # Affiche les 20 premiers points clusterisés
-        print(f"Point({p.lat}, {p.long}) -> Cluster {p.cluster}")
+        print(f"Point({p[0]}, {p[1]}) -> Cluster {p.cluster}")
