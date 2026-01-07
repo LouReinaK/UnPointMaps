@@ -1,2 +1,7 @@
 folium
 pandas
+nltk
+scikit-learn
+wordcloud
+mlxtend
+pytest
