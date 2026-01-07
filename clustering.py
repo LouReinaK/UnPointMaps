@@ -2,6 +2,7 @@
 # les points sont représentés par des objets de la classe Point et on utilisera les propriétés Point.lat et Point.long
 # dans un premier temps on implémentera un k-means avec la distance euclidienne et on cherchera le meilleur k
 import numpy as np
+from dataset_filtering import convert_to_dict_filtered
 from models import Point
 from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
@@ -9,24 +10,24 @@ import matplotlib.pyplot as plt
 from typing import List, Tuple
 
 
-def points_to_array(points: List[Point]) -> np.ndarray:
+def load_dataset(points: List[Point]) -> np.ndarray:
     """
         Convertit une liste de points en tableau numpy (lat, long)
     """
+    points = convert_to_dict_filtered()
     return np.array([[p.lat, p.long] for p in points])
 
 
-def find_optimal_k_elbow(points: List[Point], k_range: range = range(2, 11)) -> int:
+def find_optimal_k_elbow(dataset: np.ndarray, k_range: range = range(2, 11)) -> int:
     """
         Trouve le k optimal en utilisant la méthode du coude (Elbow method)
     """
-    X = points_to_array(points)
     inertias = []
     k_values = list(k_range)
     
     for k in k_values:
         kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
-        kmeans.fit(X)
+        kmeans.fit(dataset)
         inertias.append(kmeans.inertia_)
     
     # Calcul du coude en utilisant la méthode de la dérivée seconde
@@ -39,18 +40,17 @@ def find_optimal_k_elbow(points: List[Point], k_range: range = range(2, 11)) -> 
     return k_values[0]
 
 
-def find_optimal_k_silhouette(points: List[Point], k_range: range = range(2, 11)) -> int:
+def find_optimal_k_silhouette(dataset: np.ndarray, k_range: range = range(2, 11)) -> int:
     """
         Trouve le k optimal en utilisant le score de silhouette
     """
-    X = points_to_array(points)
     silhouette_scores = []
     k_values = list(k_range)
     
     for k in k_values:
         kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
-        labels = kmeans.fit_predict(X)
-        score = silhouette_score(X, labels)
+        labels = kmeans.fit_predict(dataset)
+        score = silhouette_score(dataset, labels)
         silhouette_scores.append(score)
     
     # Le k optimal est celui qui maximise le score de silhouette
@@ -58,21 +58,22 @@ def find_optimal_k_silhouette(points: List[Point], k_range: range = range(2, 11)
     return k_values[optimal_index]
 
 
-def kmeans_clustering(points: List[Point], k: int = None, 
+def kmeans_clustering(dataset: np.ndarray, k: int = None, 
                    method: str = "elbow") -> Tuple[List[Point], int]:
     """
         Fonction principale de clustering avec k-means
         peut trouver le k optimal avec la méthode du coude ou du score de silhouette si k n'est pas fourni
     """
+
+    # trouver k optimal si nécessaire
     if k is None and method=='elbow':
-        k = find_optimal_k_elbow(points, k_range=range(2, min(11, len(points))))
+        k = find_optimal_k_elbow(dataset, k_range=range(2, min(11, len(dataset))))
     elif k is None and method=='silhouette':
-        k = find_optimal_k_silhouette(points, k_range=range(2, min(11, len(points))))
+        k = find_optimal_k_silhouette(dataset, k_range=range(2, min(11, len(dataset))))
     
     # Application du clustering
-    X = points_to_array(points)
     kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
-    labels = kmeans.fit_predict(X)
+    labels = kmeans.fit_predict(dataset)
     
     # Ajout de l'attribut cluster à chaque point
     for i, point in enumerate(points):
@@ -85,9 +86,9 @@ if __name__ == "__main__":
     # fixe la seed pour la reproductibilité
     np.random.seed(42)
     # Génère des points aléatoires
-    sample_points = [Point(lat=np.random.uniform(-90, 90), long=np.random.uniform(-180, 180)) for _ in range(100)]
+    sample_points = np.array([Point(lat=np.random.uniform(-90, 90), long=np.random.uniform(-180, 180)) for _ in range(100)])
     
-    clustered_points, used_k = cluster_points(sample_points, k=3)
+    clustered_points, used_k = kmeans_clustering(sample_points)
     print(f"Clustering effectué avec k={used_k}")
     for p in clustered_points[:20]:  # Affiche les 20 premiers points clusterisés
         print(f"Point({p.lat}, {p.long}) -> Cluster {p.cluster}")
