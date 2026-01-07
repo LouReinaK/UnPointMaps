@@ -3,14 +3,13 @@
 # dans un premier temps on implémentera un k-means avec la distance euclidienne et on cherchera le meilleur k
 import numpy as np
 from dataset_filtering import convert_to_dict_filtered
-from models import Point
 from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
 import matplotlib.pyplot as plt
 from typing import List, Tuple
 
 
-def load_dataset(points: List[Point]) -> np.ndarray:
+def load_dataset(points) -> np.ndarray:
     """
         Convertit une liste de points en tableau numpy (lat, long)
     """
@@ -58,26 +57,36 @@ def find_optimal_k_silhouette(dataset: np.ndarray, k_range: range = range(2, 11)
     return k_values[optimal_index]
 
 
-def kmeans_clustering(dataset: np.ndarray, k: int = None, 
-                   method: str = "elbow") -> Tuple[List[Point], int]:
+def kmeans_clustering(dataset: any, k: int = None, 
+                   method: str = "elbow") -> Tuple[List, int]:
     """
         Fonction principale de clustering avec k-means
         peut trouver le k optimal avec la méthode du coude ou du score de silhouette si k n'est pas fourni
     """
 
+    # Préparation des données pour scikit-learn
+    if hasattr(dataset, 'iloc'): # pandas DataFrame
+        # Extraction des coordonnées
+        points_array = dataset[['latitude', 'longitude']].values
+    else: # Supposons numpy array ou liste
+        points_array = np.array(dataset)
+
     # trouver k optimal si nécessaire
     if k is None and method=='elbow':
-        k = find_optimal_k_elbow(dataset, k_range=range(2, min(11, len(dataset))))
+        k = find_optimal_k_elbow(points_array, k_range=range(2, min(11, len(points_array))))
     elif k is None and method=='silhouette':
-        k = find_optimal_k_silhouette(dataset, k_range=range(2, min(11, len(dataset))))
+        k = find_optimal_k_silhouette(points_array, k_range=range(2, min(11, len(points_array))))
     
     # Application du clustering
     kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
-    labels = kmeans.fit_predict(dataset)
+    labels = kmeans.fit_predict(points_array)
     
-    # Ajout de l'attribut cluster à chaque point
-    for i, point in enumerate(points):
-        point.cluster = int(labels[i])
+    # Organisation des points par cluster pour la visualisation
+    clusters = [[] for _ in range(k)]
+    for i, label in enumerate(labels):
+        clusters[label].append(points_array[i].tolist())
+        
+    return clusters, k
     
     return points, k
 

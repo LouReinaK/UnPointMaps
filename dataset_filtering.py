@@ -1,6 +1,5 @@
 import pandas as pd
 from datetime import datetime
-from models import Point
 
 
 def filter_dataset(df):
@@ -59,7 +58,4 @@ def convert_to_dict_filtered():
 
     return df_filtered
 
-convert_to_dict_filtered()
-
-
-
+# convert_to_dict_filtered()
