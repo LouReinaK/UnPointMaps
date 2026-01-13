@@ -16,6 +16,11 @@ def filter_dataset(df):
     print(f"Après suppression des doublons: {len_initial-len(df)} lignes filtrées.")
     len_initial = len(df)
 
+    # Supprimer les doublons de coordonnées
+    df = df.drop_duplicates(subset=['latitude', 'longitude'])
+    print(f"Après suppression des doublons de coordonnées: {len_initial-len(df)} lignes filtrées.")
+    len_initial = len(df)
+
     # Vérifier le format de la date
     df['date'] = pd.to_datetime(df['date'], errors='coerce')
     df = df.dropna(subset=['date'])

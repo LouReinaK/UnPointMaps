@@ -6,7 +6,7 @@ import os
 # Add the parent directory to Python path so we can import text_mining module
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from text_mining import (
+from src.processing.text_mining import (
     preprocess_text, combine_and_preprocess, remove_frequent_words, 
     create_binary_features, compute_tfidf_for_dataset, 
     get_cluster_tfidf_words, label_cluster_with_tfidf,

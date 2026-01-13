@@ -1,4 +1,4 @@
-folium
+﻿folium
 pandas>=2.1.1
 nltk
 scikit-learn
@@ -11,3 +11,7 @@ tenacity>=8.2.0
 pydantic>=2.0.0
 matplotlib==3.7.1
 numpy>=1.26.0
+hdbscan
+alphashape
+scipy
+shapely
