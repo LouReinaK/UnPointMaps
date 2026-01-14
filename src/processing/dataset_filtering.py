@@ -44,7 +44,7 @@ def filter_dataset(df):
 
 def load_and_prepare_data():
     # Charger le CSV
-    df = pd.read_csv('../../flickr_data2.csv', low_memory=False)
+    df = pd.read_csv('flickr_data2.csv', low_memory=False)
 
     # Supprimer les espaces au début des noms de colonnes
     df.columns = df.columns.str.strip()
