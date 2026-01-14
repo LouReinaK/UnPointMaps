@@ -28,11 +28,17 @@ def filter_dataset(df):
     df = df.dropna(subset=['date'])
     print(f"Après vérification du format de la date: {len_initial-len(df)} lignes filtrées.")
     len_initial = len(df)
+    # Supprimer les dates futures
+    current_date = datetime.now()
+    df = df[df['date'] <= current_date]
+    print(f"Après suppression des dates futures: {len_initial-len(df)} lignes filtrées.")
+    len_initial = len(df)
     
     # Vérifier les coordonnées hors de Lyon
-    lyon_coords = (45.7640, 4.8357)
-    df = df[(df['latitude'].between(lyon_coords[0] - 0.1, lyon_coords[0] + 0.1)) &
-              (df['longitude'].between(lyon_coords[1] - 0.1, lyon_coords[1] + 0.1))]
+    haut_lyon_gauche_coords = (45.82, 4.752)
+    bas_lyon_droite_coords = (45.67, 4.98)
+    df = df[(df['latitude'].between(bas_lyon_droite_coords[0], haut_lyon_gauche_coords[0])) &
+              (df['longitude'].between(haut_lyon_gauche_coords[1], bas_lyon_droite_coords[1]))]
     print(f"Après filtrage des coordonnées hors de Lyon: {len_initial-len(df)} lignes filtrées.")
     return df
 
