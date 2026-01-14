@@ -78,6 +78,7 @@ def load_and_prepare_data():
     )
     return df
 
+# Get info by geo point
 def get_info_geo(df, latitude, longitude):
     """Renvoie les informations d'un point géographique donné"""
     result = df[(df['latitude'] == latitude) & (df['longitude'] == longitude)]
