@@ -18,11 +18,6 @@ def filter_dataset(df):
     print(f"Après suppression des doublons: {len_initial-len(df)} lignes filtrées.")
     len_initial = len(df)
 
-    # Supprimer les doublons de coordonnées
-    df = df.drop_duplicates(subset=['latitude', 'longitude'])
-    print(f"Après suppression des doublons de coordonnées: {len_initial-len(df)} lignes filtrées.")
-    len_initial = len(df)
-
     # Vérifier le format de la date
     df['date'] = pd.to_datetime(df['date'], errors='coerce')
     df = df.dropna(subset=['date'])
@@ -40,7 +35,23 @@ def filter_dataset(df):
     df = df[(df['latitude'].between(bas_lyon_droite_coords[0], haut_lyon_gauche_coords[0])) &
               (df['longitude'].between(haut_lyon_gauche_coords[1], bas_lyon_droite_coords[1]))]
     print(f"Après filtrage des coordonnées hors de Lyon: {len_initial-len(df)} lignes filtrées.")
-    return df
+
+    # Regrouper par coordonnées géographiques
+    # Chaque point représente toutes les photos à cette localisation
+    df_grouped = df.groupby(['latitude', 'longitude']).agg({
+        'id': list,
+        'title': list,
+        'tags': list,
+        'date': list,
+        'user': list
+    }).reset_index()
+    print(f"Après regroupement par coordonnées dans df_groupe: {len_initial} lignes regroupées en {len(df_grouped)} points géographiques.")
+
+    # Vérifier doublons latitude/longitude
+    df=df.drop_duplicates(subset=['latitude', 'longitude'])
+    print(f"Après suppression des doublons géographiques: {len_initial-len(df)} lignes filtrées.")
+
+    return df, df_grouped
 
 def load_and_prepare_data():
     # Charger le CSV
@@ -72,12 +83,11 @@ def load_and_prepare_data():
 def convert_to_dict_filtered():
     df=load_and_prepare_data()
     df_filtered = filter_dataset(df)
-    print(f"Nombre de lignes conservées: {len(df_filtered)}")
-    print(f"Nombre de lignes supprimées: {len(df) - len(df_filtered)} \n")
+    print(f"Nombre de lignes conservées: {len(df_filtered[0])}")
+    print(f"Nombre de lignes supprimées: {len(df) - len(df_filtered[0])} \n")
 
-    return df_filtered
+    return df_filtered[0]
 
 if __name__ == "__main__":
     convert_to_dict_filtered()
 
-convert_to_dict_filtered()
