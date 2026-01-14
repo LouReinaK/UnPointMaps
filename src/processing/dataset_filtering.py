@@ -78,6 +78,12 @@ def load_and_prepare_data():
     )
     return df
 
+def get_info_geo(df, latitude, longitude):
+    """Renvoie les informations d'un point géographique donné"""
+    result = df[(df['latitude'] == latitude) & (df['longitude'] == longitude)]
+    if not result.empty:
+        return result.iloc[0].to_dict()
+    return None
 
 # Convertir en dictionnaire
 def convert_to_dict_filtered():
