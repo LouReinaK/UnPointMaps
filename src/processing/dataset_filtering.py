@@ -9,7 +9,7 @@ def filter_dataset(df):
     df = df.copy()
     len_initial = len(df)
     # Vérifier les données vides - garder seulement les lignes avec latitude, longitude et date
-    df = df.dropna(subset=['title', 'latitude', 'longitude', 'date', 'tags'])
+    df = df.dropna(subset=['latitude', 'longitude', 'date'])
     print(f"Après suppression des données vides: {len_initial-len(df)} lignes filtrées.")
     len_initial = len(df)
 
@@ -38,10 +38,16 @@ def filter_dataset(df):
 
 def load_and_prepare_data():
     # Charger le CSV
-    df = pd.read_csv('flickr_data2.csv', low_memory=False)
+    df = pd.read_csv('../../flickr_data2.csv', low_memory=False)
 
     # Supprimer les espaces au début des noms de colonnes
     df.columns = df.columns.str.strip()
+
+    # Nettoyer les colonnes de date - supprimer les caractères spéciaux (comme ";-)")
+    date_columns = ['date_taken_year', 'date_taken_month', 'date_taken_day']
+    for col in date_columns:
+        if col in df.columns:
+            df[col] = df[col].astype(str).str.replace(r'[^0-9]', '', regex=True)
 
     # Renommer les colonnes pour correspondre à ce que filter_dataset attend
     df = df.rename(columns={'lat': 'latitude', 'long': 'longitude'})
@@ -67,3 +73,5 @@ def convert_to_dict_filtered():
 
 if __name__ == "__main__":
     convert_to_dict_filtered()
+
+convert_to_dict_filtered()
