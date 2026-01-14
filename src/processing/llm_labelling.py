@@ -6,8 +6,51 @@ import logging
 import time
 from typing import Optional, Dict, Any, Union, List
 from datetime import datetime
-from dotenv import load_dotenv
+from threading import Lock
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pydantic import BaseModel, ValidationError
+from dotenv import load_dotenv
+import abc
+
+# Global Rate Limiter Configuration
+MAX_REQUESTS_PER_MINUTE = 100  # Adjust this value to change the global rate limit
+
+
+class RateLimiter:
+    """Thread-safe rate limiter using a sliding window or simple delay mechanism."""
+    def __init__(self, max_per_minute: int):
+        self.limit = max_per_minute
+        self.delay = 60.0 / max_per_minute
+        self.last_call = 0.0
+        self.lock = Lock()
+
+    def update_limit(self, max_per_minute: int):
+        """Dynamically update the rate limit."""
+        with self.lock:
+            if max_per_minute <= 0:
+                 max_per_minute = 1 # Avoid division by zero
+            self.limit = max_per_minute
+            self.delay = 60.0 / max_per_minute
+            logger.info(f"Rate limit updated to {max_per_minute} requests/minute")
+
+    def wait(self):
+        """Blocks until a request can be made."""
+        with self.lock:
+            now = time.time()
+            # Calculate when the next request is allowed
+            next_allowed_time = self.last_call + self.delay
+            wait_time = next_allowed_time - now
+            
+            if wait_time > 0:
+                time.sleep(wait_time)
+            
+            self.last_call = time.time() # Update to now (after sleep)
+
+# Initialize global rate limiter instance
+_global_rate_limiter = RateLimiter(MAX_REQUESTS_PER_MINUTE)
+
+
+# Configure logging
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 import requests
 
@@ -96,39 +139,36 @@ class ConfigManager:
         """
         try:
             # Load environment variables from .env file
-            load_dotenv(self.env_path)
+            # Use override=True to ensure .env changes are picked up even if env vars exist
+            load_dotenv(self.env_path, override=True)
             
-            # Validate required API key
-            api_key = os.getenv('OPENROUTER_API_KEY')
-            if not api_key or not api_key.strip():
-                raise ConfigurationError("OPENROUTER_API_KEY not set or empty")
+            # Identify provider
+            provider = os.getenv('LLM_PROVIDER', 'openrouter').lower()
             
-            # Basic API key validation - reasonable minimum length
-            if len(api_key.strip()) < 20:
-                raise ConfigurationError("OPENROUTER_API_KEY appears invalid - too short")
-            
-            # Load and validate other configuration parameters
             config = {
-                'api_key': api_key.strip(),
+                'provider': provider,
                 'model': os.getenv('DEFAULT_LLM_MODEL', 'mistralai/mistral-7b-instruct'),
                 'timeout': self._parse_int_env('API_TIMEOUT', 30),
                 'max_retries': self._parse_int_env('MAX_RETRIES', 3),
                 'env_path': self.env_path
             }
-            
-            # Validate model name format
-            if not config['model'] or len(config['model'].split('/')) != 2:
-                raise ConfigurationError("DEFAULT_LLM_MODEL must be in format 'provider/model-name'")
-            
-            # Validate timeout and retry values
-            if config['timeout'] <= 0:
-                raise ConfigurationError("API_TIMEOUT must be a positive integer")
-            
-            if config['max_retries'] < 0:
-                raise ConfigurationError("MAX_RETRIES must be a non-negative integer")
-            
+
+            if provider == 'ollama':
+                ollama_url = os.getenv('OLLAMA_BASE_URL', 'http://localhost:11434')
+                config['ollama_base_url'] = ollama_url
+                config['api_key'] = 'ollama'
+                logger.info(f"Using provider: {provider} with base URL: {ollama_url}")
+            else:
+                # OpenRouter Specifics
+                api_key = os.getenv('OPENROUTER_API_KEY')
+                if not api_key or not api_key.strip():
+                     raise ConfigurationError("OPENROUTER_API_KEY not set or empty")
+                if len(api_key.strip()) < 20:
+                     raise ConfigurationError("OPENROUTER_API_KEY appears invalid - too short")
+                config['api_key'] = api_key.strip()
+
             self.config = config
-            logger.info(f"Configuration loaded successfully from {self.env_path}")
+            logger.info(f"Configuration loaded successfully from {self.env_path} (Provider: {provider})")
             
         except Exception as e:
             raise ConfigurationError(f"Failed to load environment configuration: {str(e)}")
@@ -171,12 +211,23 @@ class ConfigManager:
         
         return self.config.copy()
     
+    def get_provider(self) -> str:
+        if self.config is None:
+             # Default fallback if somehow not loaded, though init handles it
+             return 'openrouter'
+        return self.config.get('provider', 'openrouter')
+
+    def get_ollama_base_url(self) -> str:
+        if self.config is None:
+             return 'http://localhost:11434'
+        return self.config.get('ollama_base_url', 'http://localhost:11434')
+
     def get_api_key(self) -> str:
         """
-        Get the OpenRouter API key.
+        Get the API key.
         
         Returns:
-            OpenRouter API key string
+            API key string
             
         Raises:
             ConfigurationError: If API key is not available
@@ -352,44 +403,58 @@ def validate_input_metadata(metadata: dict) -> bool:
         raise InputValidationError(f"Invalid metadata structure: {str(e)}")
 
 
-def initialize_llm_client(api_key: str, model: Optional[str] = None, timeout: int = 30):
+def initialize_llm_client(api_key: str, model: Optional[str] = None, timeout: int = 30, 
+                          base_url: str = 'https://openrouter.ai/api/v1'):
     """
-    Initialize the LLM client with OpenRouter API configuration.
+    Initialize the LLM client configuration.
     
     Args:
-        api_key: OpenRouter API key
+        api_key: API key
         model: LLM model identifier (e.g., 'mistralai/mistral-7b-instruct')
         timeout: API request timeout in seconds
+        base_url: Base URL for the API
         
     Returns:
-        Dictionary containing client configuration (placeholder for actual client)
+        Dictionary containing client configuration
         
     Raises:
-        ValueError: If api_key is invalid or empty
-        ConnectionError: If unable to establish connection
+        ValueError: If api_key is invalid or empty (unless using Ollama/local)
     """
-    # Validate API key
-    if not api_key or not api_key.strip():
-        raise ValueError("API key cannot be empty")
+    # Validate API key (skip if using local/ollama which might have dummy key)
+    is_local = 'localhost' in base_url or '127.0.0.1' in base_url or api_key == 'ollama'
     
-    # Basic API key validation
-    if len(api_key.strip()) < 20:
-        raise ValueError("API key appears invalid")
+    if not is_local:
+        if not api_key or not api_key.strip():
+            raise ValueError("API key cannot be empty")
+        
+        # Basic API key validation
+        if len(api_key.strip()) < 20:
+            raise ValueError("API key appears invalid")
     
     # Validate model
-    if model and len(model.split('/')) != 2:
-        raise ValueError("Model must be in format 'provider/model-name'")
+    if model and len(model.split('/')) != 2 and not is_local:
+        # Standardize warning but allow pass for local models which might be just "llama3"
+        pass 
     
-    # Return client configuration (actual client implementation would go here)
+    # Return client configuration
     return {
         'api_key': api_key,
         'model': model or 'mistralai/mistral-7b-instruct',
         'timeout': timeout,
-        'base_url': 'https://openrouter.ai/api/v1'
+        'base_url': base_url
     }
 
 
-class OpenRouterAPIClient:
+class BaseLLMClient(abc.ABC):
+    """Abstract base class for LLM clients."""
+    
+    @abc.abstractmethod
+    def call_llm_api(self, prompt: str, max_tokens: int = 100,
+                    temperature: float = 0.7) -> dict:
+        pass
+
+
+class OpenRouterAPIClient(BaseLLMClient):
     """
     Client for interacting with OpenRouter API for LLM services.
     
@@ -417,53 +482,52 @@ class OpenRouterAPIClient:
         self.max_retries = max_retries
         self.base_url = 'https://openrouter.ai/api/v1'
         
-        # Validate configuration
-        if not self._validate_api_key(api_key):
-            raise ConfigurationError("Invalid OpenRouter API key")
-            
-        if not self._validate_model(model):
-            raise ConfigurationError("Invalid model identifier")
-        
         # Import requests library
         import requests
         self.requests = requests
         
         logger.info(f"OpenRouterAPIClient initialized with model: {model}")
-    
-    def _validate_api_key(self, api_key: str) -> bool:
-        """
-        Validate API key format.
         
-        Args:
-            api_key: API key to validate
-            
-        Returns:
-            True if API key appears valid, False otherwise
-        """
-        if not api_key or not isinstance(api_key, str):
-            return False
+        # Check rate limits and model type on initialization
+        self._check_initial_limits()
         
-        # Basic validation - reasonable length and format
-        stripped_key = api_key.strip()
-        return len(stripped_key) >= 20 and 'sk-' in stripped_key.lower()
-    
-    def _validate_model(self, model: str) -> bool:
+    def _check_initial_limits(self):
         """
-        Validate model identifier format.
-        
-        Args:
-            model: Model identifier to validate
-            
-        Returns:
-            True if model identifier is valid, False otherwise
+        Check rate limits based on model type and API key status.
+        Dynamically limits request rate for free models or restricted keys.
         """
-        if not model or not isinstance(model, str):
-            return False
-        
-        # Model should be in format 'provider/model-name'
-        parts = model.split('/')
-        return len(parts) == 2 and all(part.strip() for part in parts)
-    
+        try:
+            # 1. Check for free specific model suffix
+            if self.model.endswith(':free'):
+                logger.info(f"Detected free model '{self.model}'. Enforcing strict rate limit (20 RPM).")
+                _global_rate_limiter.update_limit(20)
+                return
+
+            # 2. Check API key status against OpenRouter /key endpoint
+            try:
+                headers = {'Authorization': f'Bearer {self.api_key}'}
+                response = self.requests.get(f'{self.base_url}/key', headers=headers, timeout=10)
+                
+                if response.status_code == 200:
+                    data = response.json().get('data', {})
+                    is_free_tier = data.get('is_free_tier', False)
+                    # Note: rate_limit object is deprecated, so we rely on is_free_tier or other indicators
+                    
+                    if is_free_tier and self.model.endswith(':free'):
+                         _global_rate_limiter.update_limit(20)
+                         logger.info("Detected free tier user on free model. Limit set to 20 RPM.")
+                    
+                    # Log credit info for debugging
+                    usage = data.get('usage', 'unknown')
+                    limit = data.get('limit', 'unknown')
+                    logger.info(f"API Key Stats - Usage: {usage}, Limit: {limit}, Free Tier: {is_free_tier}")
+                    
+            except Exception as e:
+                logger.warning(f"Failed to fetch key info from OpenRouter: {e}")
+                
+        except Exception as e:
+            logger.error(f"Error checking initial rate limits: {e}")
+
     def _construct_request_headers(self) -> dict:
         """
         Construct HTTP headers for OpenRouter API request.
@@ -534,6 +598,9 @@ class OpenRouterAPIClient:
         start_time = time.time()
         
         try:
+            # Enforce global rate limit before making request
+            _global_rate_limiter.wait()
+
             # Construct request
             headers = self._construct_request_headers()
             payload = self._construct_request_payload(prompt, max_tokens, temperature)
@@ -548,6 +615,17 @@ class OpenRouterAPIClient:
                 timeout=self.timeout
             )
             
+            # Special handling for Rate Limits (429)
+            if response.status_code == 429:
+                logger.warning("Received 429 Too Many Requests. Reducing rate limit dynamically.")
+                # Reduce limit by half, minimum 5 RPM
+                current_limit = _global_rate_limiter.limit
+                new_limit = max(5, int(current_limit * 0.5))
+                _global_rate_limiter.update_limit(new_limit)
+                
+                # Wait a bit longer before retry (managed by 'tenacity', but we can log)
+                raise APICommunicationError("Rate limit exceeded (429)")
+
             # Check response status
             response.raise_for_status()
             
@@ -603,6 +681,77 @@ class OpenRouterAPIClient:
                 raise LLMProcessingError(f"LLM processing failed: {str(e)}")
 
 
+class OllamaClient(BaseLLMClient):
+    """
+    Client for interacting with local Ollama instance.
+    """
+    def __init__(self, base_url: str, model: str, timeout: int = 30):
+        self.base_url = base_url.rstrip('/')
+        self.model = model
+        self.timeout = timeout
+        import requests
+        self.requests = requests
+        logger.info(f"OllamaClient initialized with model: {model} at {base_url}")
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=5),
+        retry=retry_if_exception_type((requests.exceptions.RequestException, Exception))
+    )
+    def call_llm_api(self, prompt: str, max_tokens: int = 100,
+                    temperature: float = 0.7) -> dict:
+        import time
+        start_time = time.time()
+        
+        # Ollama API format
+        payload = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": False,
+            "options": {
+                "temperature": temperature,
+                "num_predict": max_tokens
+            }
+        }
+        
+        try:
+            # Enforce global rate limit (even for local, to avoid system freeze)
+            # Maybe less strict but good practice
+            # _global_rate_limiter.wait() 
+
+            response = self.requests.post(
+                f"{self.base_url}/api/chat",
+                json=payload,
+                timeout=self.timeout
+            )
+            response.raise_for_status()
+            data = response.json()
+            
+            content = data.get('message', {}).get('content', '')
+            
+            # Extract metrics if available
+            # Ollama returns durations in nanoseconds
+            total_duration = data.get('total_duration', 0) / 1e9
+            
+            return {
+                'content': content.strip(),
+                'model': data.get('model', self.model),
+                'timing': {
+                    'llm_response_time': total_duration,
+                    'total_processing_time': time.time() - start_time
+                },
+                'tokens': {
+                    'prompt_tokens': data.get('prompt_eval_count', 0),
+                    'completion_tokens': data.get('eval_count', 0),
+                    'total_tokens': data.get('prompt_eval_count', 0) + data.get('eval_count', 0)
+                },
+                'raw_response': data
+            }
+
+        except Exception as e:
+            raise APICommunicationError(f"Ollama API failed: {str(e)}")
+
+
 class LLMLabelingService:
     """
     Main service class for LLM-based cluster labeling.
@@ -624,15 +773,24 @@ class LLMLabelingService:
         self.config_manager = config_manager
         self.config = config_manager.get_config()
         
-        # Initialize API client
-        self.api_client = OpenRouterAPIClient(
-            api_key=self.config['api_key'],
-            model=self.config['model'],
-            timeout=self.config['timeout'],
-            max_retries=self.config['max_retries']
-        )
+        provider = config_manager.get_provider()
         
-        logger.info("LLMLabelingService initialized successfully")
+        if provider == 'ollama':
+            self.api_client = OllamaClient(
+                base_url=config_manager.get_ollama_base_url(),
+                model=self.config['model'],
+                timeout=self.config['timeout']
+            )
+        else:
+            # Default to OpenRouter
+            self.api_client = OpenRouterAPIClient(
+                api_key=self.config['api_key'],
+                model=self.config['model'],
+                timeout=self.config['timeout'],
+                max_retries=self.config['max_retries']
+            )
+        
+        logger.info(f"LLMLabelingService initialized successfully (Provider: {provider})")
     
     def validate_and_prepare_input(self, cluster_metadata: dict) -> ClusterMetadata:
         """
@@ -708,13 +866,17 @@ Cluster Information:
 Text Metadata (from images in this cluster):
 {combined_text}
 
-Please provide a concise, descriptive label for this cluster. The label should:
-1. Be informative and specific
-2. Capture the main theme or subject
-3. Be suitable for use in data analysis and visualization
-4. Be 3-8 words in length
+Instructions:
+1. Analyze the metadata to identify the common theme, location, or event.
+2. Create a specific, short label (2-6 words).
+3. IMPORTANT: Output ONLY the label text. Do not include "Label:", quotes, explanations, or any other text.
 
-Label:"""
+Example Output:
+Eiffel Tower Night View
+
+Your Label:"""
+        
+        return prompt
         
         return prompt
     
@@ -805,6 +967,57 @@ Label:"""
             logger.error(f"Label generation failed: {error_info}")
             raise LLMProcessingError(f"Label generation failed: {str(e)}")
     
+    def process_batch(self, cluster_metadata_list: List[dict], max_workers: int = 1) -> Dict[int, str]:
+        """
+        Process a batch of clusters in parallel.
+        
+        Args:
+            cluster_metadata_list: List of cluster metadata dictionaries. 
+                                 Each must have 'cluster_id' like 'cluster_123'.
+            max_workers: Number of parallel workers
+            
+        Returns:
+            Dictionary mapping cluster index (int) to label
+        """
+        results = {}
+        
+        def _process_single(meta):
+            # Extract index from cluster_id "cluster_123" -> 123
+            c_id = meta.get('cluster_id', 'cluster_0')
+            try:
+                idx = int(c_id.split('_')[1])
+            except:
+                idx = -1
+            
+            try:
+                result = self.generate_cluster_label(meta)
+                return idx, result.label, None
+            except Exception as e:
+                return idx, c_id, str(e)
+
+        logger.info(f"Starting batch processing with {max_workers} workers for {len(cluster_metadata_list)} clusters")
+        print(f"\nProcessing {len(cluster_metadata_list)} clusters with {max_workers} parallel workers...")
+        
+        # Display progress bar or counter
+        completed_count = 0
+        total_count = len(cluster_metadata_list)
+        
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_meta = {executor.submit(_process_single, meta): meta for meta in cluster_metadata_list}
+            
+            for future in as_completed(future_to_meta):
+                idx, label, error = future.result()
+                results[idx] = label
+                completed_count += 1
+                
+                if error:
+                    logger.error(f"Error processing cluster {idx}: {error}")
+                    print(f"[{completed_count}/{total_count}] Cluster {idx} failed: {error}")
+                else:
+                    print(f"[{completed_count}/{total_count}] Cluster {idx} labelled: {label}")
+                     
+        return results
+
     def _process_llm_response(self, raw_label: str,
                              metadata: ClusterMetadata) -> str:
         """

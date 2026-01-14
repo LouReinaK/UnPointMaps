@@ -53,6 +53,33 @@ class DatabaseManager:
             )
         ''')
 
+        # Table to store event detection runs
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS event_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT,
+                dataset_size INTEGER,
+                dataset_signature TEXT
+            )
+        ''')
+        
+        # Table to store detected events
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS detected_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id INTEGER,
+                event_index INTEGER,
+                start_day INTEGER,
+                end_day INTEGER,
+                start_date_str TEXT,
+                end_date_str TEXT,
+                total_entries INTEGER,
+                label TEXT,
+                days_json TEXT,
+                FOREIGN KEY (run_id) REFERENCES event_runs (id)
+            )
+        ''')
+
         conn.commit()
         conn.close()
 
@@ -164,5 +191,91 @@ class DatabaseManager:
                 
             return clustered_points, llm_labels
             
+        finally:
+            conn.close()
+
+    def get_cached_events(self, dataset_size: int) -> Optional[List[Dict]]:
+        """Retrieve cached events for a dataset of a given size."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        try:
+            # Find the most recent run with matching dataset size
+            cursor.execute(
+                "SELECT id FROM event_runs WHERE dataset_size = ? ORDER BY id DESC LIMIT 1",
+                (dataset_size,)
+            )
+            row = cursor.fetchone()
+            if not row:
+                return None
+                
+            run_id = row[0]
+            
+            cursor.execute('''
+                SELECT event_index, start_day, end_day, start_date_str, end_date_str, 
+                       total_entries, label, days_json 
+                FROM detected_events 
+                WHERE run_id = ? 
+                ORDER BY total_entries DESC
+            ''', (run_id,))
+            
+            events = []
+            for r in cursor.fetchall():
+                events.append({
+                    'id': r[0],
+                    'start_day': r[1],
+                    'end_day': r[2],
+                    'start_date_str': r[3],
+                    'end_date_str': r[4],
+                    'total_entries': r[5],
+                    'label': r[6],
+                    'days': json.loads(r[7])
+                })
+                
+            return events
+        finally:
+            conn.close()
+
+    def save_events(self, dataset_size: int, events: List[Dict]):
+        """Save detected events to cache."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        try:
+            timestamp = datetime.now().isoformat()
+            
+            # Create run
+            cursor.execute(
+                "INSERT INTO event_runs (timestamp, dataset_size) VALUES (?, ?)",
+                (timestamp, dataset_size)
+            )
+            run_id = cursor.lastrowid
+            
+            # Insert events
+            batch = []
+            for e in events:
+                batch.append((
+                    run_id,
+                    e['id'],
+                    e['start_day'],
+                    e['end_day'],
+                    e.get('start_date_str', ''),
+                    e.get('end_date_str', ''),
+                    e['total_entries'],
+                    e['label'],
+                    json.dumps(e['days'])
+                ))
+            
+            cursor.executemany('''
+                INSERT INTO detected_events 
+                (run_id, event_index, start_day, end_day, start_date_str, end_date_str, 
+                total_entries, label, days_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', batch)
+            
+            conn.commit()
+        except Exception as e:
+            conn.rollback()
+            raise e
         finally:
             conn.close()

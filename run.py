@@ -5,6 +5,7 @@ from src.visualization.map_visualisation import Visualisation
 from src.utils.hull_logic import compute_cluster_hulls
 from src.processing.llm_labelling import ConfigManager, LLMLabelingService
 from src.database.manager import DatabaseManager
+from src.cli_menu import CLIMenu
 import webbrowser
 import sys
 import pandas as pd
@@ -27,6 +28,16 @@ limit = -1
 if limit != -1:
     print(f"Limiting dataset to first {limit} points for performance...")
     df = df.head(limit)
+
+# === CLI INTERFACE ===
+# Invoke menu to filter dataset
+cli = CLIMenu()
+df = cli.run(df)
+
+if len(df) == 0:
+    print("No data left after filtering. Exiting.")
+    sys.exit(0)
+# =====================
 
 # HDBSCAN settings
 min_cluster_size = 10
@@ -85,6 +96,9 @@ if not cached_run_id: # Only run if not cached
         
         print(f"Labelling {used_k} clusters using {config_manager.get_model()}...")
         
+        clusters_to_process = []
+        print("Preparing cluster metadata...")
+
         for i in range(used_k):
             # Extract cluster points from original dataframe
             # labels numpy array matches df rows
@@ -122,15 +136,18 @@ if not cached_run_id: # Only run if not cached
                 "text_metadata": text_metadata, # Service handles joining
                 "cluster_size": len(cluster_df)
             }
+            clusters_to_process.append(cluster_meta)
             
-            # Generate Label
-            try:
-                print(f"  Processing Cluster {i} ({len(cluster_df)} points)... ", end="", flush=True)
-                result = labeling_service.generate_cluster_label(cluster_meta)
-                llm_labels[i] = result.label
-                print(f"Done -> '{result.label}'")
-            except Exception as e:
-                print(f"Failed -> {e}")
+        # Process in batches
+        # Use a reasonable number of workers (e.g., 5 or 10) to allow concurrent processing
+        # while the rate limiter imposes the speed limit.
+        max_workers = 5 
+        results = labeling_service.process_batch(clusters_to_process, max_workers)
+        llm_labels.update(results)
+        
+        # Fill in missing labels
+        for i in range(used_k):
+            if i not in llm_labels:
                 llm_labels[i] = f"Cluster {i}"
         
         # Save to Cache
