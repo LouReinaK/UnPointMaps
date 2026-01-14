@@ -2,7 +2,7 @@
 # dans un premier temps on implémentera un k-means avec la distance euclidienne et on cherchera le meilleur k
 import pandas as pd
 import numpy as np
-from src.processing.dataset_filtering import convert_to_dict_filtered
+from ..processing.dataset_filtering import convert_to_dict_filtered
 from sklearn.cluster import KMeans
 from sklearn.neighbors import NearestNeighbors
 from sklearn.metrics import silhouette_score
