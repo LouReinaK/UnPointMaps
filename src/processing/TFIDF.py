@@ -38,41 +38,36 @@ def calculer_pourcentage_mots(texte: str) -> Dict[str, float]:
     
     return pourcentages
 
-def tdidf_mots_cluster(df: pd.DataFrame, cluster: list) -> Dict[str, float]:
+def tdidf_mots_clusters(df: pd.DataFrame, clusters: list) -> list:
     """
-        Calcule le tfidf des mots dans un cluster donné.
+        Calcule le TF-IDF des mots de chaque cluster par rapport à tous les autres clusters.
     """
-    texte = cluster_to_texte(df, cluster)
+    # Convertir tous les clusters en textes
+    textes_clusters = []
+    for cluster in clusters:
+        texte = cluster_to_texte(df, cluster)
+        textes_clusters.append(texte if texte else "")
     
-    if not texte or not texte.strip():
-        return {}
+    # Vérifier que le cluster cible n'est pas vide
+    if not any(textes_clusters) or all(not texte.strip() for texte in textes_clusters):
+        return []
     
+    # Calculer TF-IDF sur tous les clusters
     vectorizer = TfidfVectorizer(token_pattern=r'[^,]+', lowercase=True)
-    tfidf_matrix = vectorizer.fit_transform([texte])
+    tfidf_matrix = vectorizer.fit_transform(textes_clusters)
     
     # Récupérer les noms des features (mots)
     feature_names = vectorizer.get_feature_names_out()
     
-    tfidf_scores = {
-        feature_names[i].strip(): tfidf_matrix[0, i]
-        for i in range(len(feature_names))
-    }
+    # Extraire les scores TF-IDF pour chaque cluster
+    tfidf_scores_clusters = []
+    for cluster_index in range(len(textes_clusters)):
+        tfidf_scores = {
+            feature_names[i].strip(): tfidf_matrix[cluster_index, i]
+            for i in range(len(feature_names))
+            if tfidf_matrix[cluster_index, i] > 0  # Ne garder que les mots présents dans ce cluster
+        }
+        tfidf_scores_clusters.append(tfidf_scores)
     
-    return tfidf_scores
+    return tfidf_scores_clusters
 
-
-
-if __name__ == "__main__":
-    # mots les plus utilisés dans la base de flickr data
-    df = convert_to_dict_filtered()
-    textes = df['tags'].dropna().tolist()
-
-    # Combiner tous les textes en un seul
-    texte_combine = " ".join(textes)
-    resultats = calculer_pourcentage_mots(texte_combine)
-
-    # Afficher les 10 mots les plus fréquents
-    mots_tries = sorted(resultats.items(), key=lambda x: x[1], reverse=True)
-    print("\nLes 10 mots les plus fréquents:")
-    for mot, pourcentage in mots_tries[:10]:
-        print(f"Mot: '{mot}' - Pourcentage: {pourcentage:.8f}%")
