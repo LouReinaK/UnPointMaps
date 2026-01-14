@@ -15,3 +15,6 @@ hdbscan
 alphashape
 scipy
 shapely
+fastapi
+uvicorn
+websockets

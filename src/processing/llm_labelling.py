@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 import abc
 
 # Global Rate Limiter Configuration
-MAX_REQUESTS_PER_MINUTE = 100  # Adjust this value to change the global rate limit
+MAX_REQUESTS_PER_MINUTE = 1000  # Adjust this value to change the global rate limit
 
 
 class RateLimiter:

@@ -7,7 +7,7 @@ from typing import Dict, List, Optional, Tuple, Any
 import os
 
 class DatabaseManager:
-    def __init__(self, db_path: str = "cache.db"):
+    def __init__(self, db_path: str = "unpointmaps_cache.db"):
         self.db_path = db_path
         self._init_db()
 
