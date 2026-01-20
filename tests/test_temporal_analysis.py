@@ -1,7 +1,7 @@
+from unittest.mock import MagicMock, patch
 import pytest
 import pandas as pd
 import numpy as np
-from unittest.mock import MagicMock, patch
 
 from src.visualization import temporal_analysis
 
@@ -37,8 +37,8 @@ class TestTemporalAnalysis:
     @patch('src.visualization.temporal_analysis.ConfigManager')
     def test_analyze_timestamps(
             self,
-            mock_config,
-            mock_llm,
+            _,
+            __,
             mock_plt,
             sample_df):
         # Setup mocks

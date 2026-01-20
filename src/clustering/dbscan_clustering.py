@@ -68,7 +68,7 @@ def dbscan_clustering(dataset: Any,
         cluster_points = points_array[labels == label]
         clusters.append(cluster_points.tolist())
 
-
+    return clusters, n_clusters, labels
 
 
 if __name__ == "__main__":

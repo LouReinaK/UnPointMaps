@@ -109,7 +109,7 @@ def main():
         try:
             print("\n--- Starting LLM Labeling ---")
             # Initialize ConfigManager and Service
-            # Note: Ensure .env file exists with OPENROUTER_API_KEY
+            # Note: Ensure .env file exists with OPENAI_API_KEY
             config_manager = ConfigManager()
             labeling_service = LLMLabelingService(config_manager)
 

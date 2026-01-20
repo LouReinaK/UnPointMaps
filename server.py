@@ -1,3 +1,5 @@
+from typing import List, Dict, Optional, Set, Any
+from contextlib import asynccontextmanager
 import threading
 import asyncio
 import json
@@ -5,12 +7,9 @@ import logging
 import queue
 import time
 import urllib.parse
-from typing import List, Dict, Optional, Set, Any
-from contextlib import asynccontextmanager
 import hashlib
-import requests
 import re
-
+import requests
 import pandas as pd
 import numpy as np
 from fastapi.responses import HTMLResponse

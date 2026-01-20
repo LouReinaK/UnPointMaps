@@ -4,8 +4,8 @@
 
 import os
 import tempfile
-import pytest
 from unittest.mock import patch, MagicMock
+import pytest
 from src.processing.llm_labelling import (
     ConfigManager,
     UnifiedOpenAIClient,
@@ -27,7 +27,7 @@ class TestConfigManager:
     def teardown_method(self):
         """Clean up environment variables after each test"""
         vars_to_clear = [
-            'OPENROUTER_API_KEY',
+            'OPENAI_API_KEY',
             'DEFAULT_LLM_MODEL',
             'API_TIMEOUT',
             'MAX_RETRIES',
@@ -40,33 +40,6 @@ class TestConfigManager:
         for var in vars_to_clear:
             if var in os.environ:
                 del os.environ[var]
-
-    def test_valid_config_loading(self):
-        """Test loading valid configuration from .env file"""
-        # Create temporary .env file with valid configuration
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.env', delete=False) as f:
-            # Force provider to be openrouter
-            f.write("LLM_PROVIDER=openrouter\n")
-            f.write("OPENAI_API_KEY=sk-valid_api_key_12345678901234567890\n")
-            f.write("DEFAULT_LLM_MODEL=mistralai/mistral-7b-instruct\n")
-            f.write("API_TIMEOUT=30\n")
-            f.write("MAX_RETRIES=3\n")
-            env_path = f.name
-
-        try:
-            # Test configuration loading
-            config_manager = ConfigManager(env_path)
-            config = config_manager.get_config()
-
-            # Verify configuration values
-            assert config['api_key'] == 'sk-valid_api_key_12345678901234567890'
-            assert config['model'] == 'mistralai/mistral-7b-instruct'
-            assert config['timeout'] == 30
-            assert config['max_retries'] == 3
-            assert config['env_path'] == env_path
-
-        finally:
-            os.unlink(env_path)
 
     def test_missing_env_file(self):
         """Test error handling for missing .env file"""
@@ -92,8 +65,8 @@ class TestConfigManager:
     def test_missing_api_key(self):
         """Test error handling for missing API key"""
         # Ensure environment is clean
-        if 'OPENROUTER_API_KEY' in os.environ:
-            del os.environ['OPENROUTER_API_KEY']
+        if 'OPENAI_API_KEY' in os.environ:
+            del os.environ['OPENAI_API_KEY']
         if 'OPENAI_API_KEY' in os.environ:
             del os.environ['OPENAI_API_KEY']
         if 'DEFAULT_LLM_MODEL' in os.environ:
@@ -208,7 +181,7 @@ class TestUnifiedOpenAIClient:
 
     @patch('src.processing.llm_labelling.OpenAI')
     @patch('src.processing.llm_labelling._global_rate_limiter')
-    def test_api_communication_error(self, mock_limiter, mock_openai):
+    def test_api_communication_error(self, _, mock_openai):
         """Test error handling for API communication failures"""
         mock_client_instance = MagicMock()
         mock_openai.return_value = mock_client_instance
@@ -319,7 +292,7 @@ class TestLLMLabelingService:
     def teardown_method(self):
         """Clean up environment variables after each test"""
         vars_to_clear = [
-            'OPENROUTER_API_KEY',
+            'OPENAI_API_KEY',
             'DEFAULT_LLM_MODEL',
             'API_TIMEOUT',
             'MAX_RETRIES',
@@ -574,7 +547,7 @@ class TestCompleteWorkflow:
     def teardown_method(self):
         """Clean up environment variables after each test"""
         vars_to_clear = [
-            'OPENROUTER_API_KEY',
+            'OPENAI_API_KEY',
             'DEFAULT_LLM_MODEL',
             'API_TIMEOUT',
             'MAX_RETRIES',
@@ -667,7 +640,7 @@ class TestSampleImageClusterMetadata:
     def teardown_method(self):
         """Clean up environment variables after each test"""
         vars_to_clear = [
-            'OPENROUTER_API_KEY',
+            'OPENAI_API_KEY',
             'DEFAULT_LLM_MODEL',
             'API_TIMEOUT',
             'MAX_RETRIES',

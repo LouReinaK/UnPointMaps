@@ -51,3 +51,4 @@ Thumbs.db
 *.log
 *.png
 node_modules/
+unpointmaps_cache.db
