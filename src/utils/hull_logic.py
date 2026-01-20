@@ -5,261 +5,482 @@ from shapely.ops import unary_union
 from scipy.spatial import ConvexHull, Delaunay
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import minimum_spanning_tree
+import multiprocessing
+import concurrent.futures
+
+import json
+import hashlib
+from src.database.manager import DatabaseManager
+
+# --- Optimization Step 4: Caching (via DatabaseManager) ---
+# We use a global instance for the module. 
+# Note: SQLite connections shouldn't be shared across processes, 
+# but DatabaseManager creates a fresh connection per call, so it is safe.
+_DB_MANAGER = DatabaseManager()
+
+def _hash_points(points):
+    """Creates a deterministic hash for the points to use in persistent caching."""
+    if isinstance(points, np.ndarray):
+        if not points.flags['C_CONTIGUOUS']:
+            points = np.ascontiguousarray(points)
+        data = points.tobytes()
+    else:
+        # list of lists
+        data = str(points).encode('utf-8')
+    return hashlib.md5(data).hexdigest()
+
+def _get_cache_key(points, alpha, auto_alpha_quantile):
+    # Combine point hash with parameters
+    h = _hash_points(points)
+    # Ensure params are strings
+    a = str(alpha) if alpha is not None else "None"
+    q = str(auto_alpha_quantile)
+    return f"{h}_a{a}_q{q}"
+
+def _cache_result(key, value):
+    _DB_MANAGER.save_cached_hull(key, value)
+
+def _get_from_cache(key):
+    return _DB_MANAGER.get_cached_hull(key)
+
 
 def get_alpha_shape(points, alpha=None, auto_alpha_quantile=0.95):
     """
     Computes the alpha shape (concave hull) of a set of 2D points.
+    Optimized version with vectorization and caching.
+    
     Input: list of [lat, lon] or (lat, lon)
            alpha: Threshold for circumradius of Delaunay triangles.
-                  If None, auto-computed based on auto_alpha_quantile.
-           auto_alpha_quantile: Percentile (0 to 1) to use if alpha is None. 
-                  Higher = looser (more convex), Lower = tighter (more concave).
-    Output: list of [lat, lon] forming the alpha shape boundary
+           auto_alpha_quantile: Percentile to use if alpha is None.
+    Output: list of list of [lat, lon]
     """
+    # Quick check for empty
+    if not points:
+        return []
+
+    # 1. Caching Check
+    cache_key = _get_cache_key(points, alpha, auto_alpha_quantile)
+    cached_res = _get_from_cache(cache_key)
+    if cached_res is not None:
+        return cached_res
+
     # Remove duplicates
     unique_points = list(set(tuple(p) for p in points))
     
     if len(unique_points) <= 2:
-        return [[list(p) for p in unique_points]]
+        res = [[list(p) for p in unique_points]]
+        _cache_result(cache_key, res)
+        return res
     
     if len(unique_points) == 3:
-        # For 3 points, just return them as a triangle
-        return [[list(p) for p in unique_points]]
+        res = [[list(p) for p in unique_points]]
+        _cache_result(cache_key, res)
+        return res
 
-    # Convert to numpy array
     points_array = np.array(unique_points)
     
     try:
+        # --- Optimization Step 3: Delaunay Triangulation ---
         tri = Delaunay(points_array)
         triangles = points_array[tri.simplices]
         
-        # Calculate side lengths
-        a = np.sqrt(np.sum((triangles[:, 0] - triangles[:, 1])**2, axis=1))
-        b = np.sqrt(np.sum((triangles[:, 1] - triangles[:, 2])**2, axis=1))
-        c = np.sqrt(np.sum((triangles[:, 2] - triangles[:, 0])**2, axis=1))
+        # --- Optimization Step 9: Use Vectorized Operations ---
+        # Calculate side lengths a, b, c
+        # Edges: 0-1, 1-2, 2-0
+        # Use np.hypot for speed on 2D vectors
+        v01 = triangles[:, 0] - triangles[:, 1]
+        v12 = triangles[:, 1] - triangles[:, 2]
+        v20 = triangles[:, 2] - triangles[:, 0]
         
-        s = (a + b + c) / 2
-        # Area using Heron's formula
-        val = s * (s - a) * (s - b) * (s - c)
-        val = np.maximum(val, 0)
+        a = np.hypot(v01[:, 0], v01[:, 1])
+        b = np.hypot(v12[:, 0], v12[:, 1])
+        c = np.hypot(v20[:, 0], v20[:, 1])
+        
+        s = (a + b + c) / 2.0
+        # Area using Heron's formula (clamped to 0)
+        val = np.maximum(s * (s - a) * (s - b) * (s - c), 0)
         area = np.sqrt(val)
         
-        # Filter singularity
-        mask = area > 1e-10
+        # Filter singularity (very small area)
+        valid_tri_mask = area > 1e-10
         
         # Circumradius R = abc / (4 * area)
-        circum_r = np.full(area.shape, np.inf)
-        circum_r[mask] = (a[mask] * b[mask] * c[mask]) / (4.0 * area[mask])
+        circum_r = np.full(len(triangles), np.inf)
+        circum_r[valid_tri_mask] = (a[valid_tri_mask] * b[valid_tri_mask] * c[valid_tri_mask]) / (4.0 * area[valid_tri_mask])
         
-        # Auto-compute alpha if None
+        # --- Optimization Step 5: Optimize Alpha Calculation ---
         if alpha is None:
-            # Use percentile of circumradii (keeps most triangles but removes very large ones)
-            # Filter out infinite radii first (collinear points)
+            # Filter finite radii
             valid_r = circum_r[np.isfinite(circum_r)]
             if len(valid_r) > 0:
-                # Convert 0-1 range to 0-100 for numpy
+                # np.percentile is essentially efficient
                 alpha = np.percentile(valid_r, auto_alpha_quantile * 100)
             else:
-                alpha = 1.0 # arbitrary default
+                alpha = 1.0
         
         keep_indices = circum_r < alpha
 
-        # ---------------------------------------------------------
-        # FORCE INCLUSION: Ensure every point is covered by at least one triangle
-        # ---------------------------------------------------------
-        # Check which points are currently covered by the kept triangles
-        point_covered = np.zeros(len(points_array), dtype=bool)
-        kept_simplices_indices = tri.simplices[keep_indices]
+        # --- Optimization: Vectorized Force Inclusion ---
+        # Ensure every point is covered by at least one kept triangle.
         
-        if len(kept_simplices_indices) > 0:
-            covered_indices_flat = np.unique(kept_simplices_indices)
-            point_covered[covered_indices_flat] = True
+        # 1. Identify uncovered points
+        kept_simplices = tri.simplices[keep_indices]
+        if len(kept_simplices) > 0:
+            covered_vertices = np.unique(kept_simplices)
+        else:
+            covered_vertices = np.array([], dtype=int)
             
-        missing_indices = np.flatnonzero(~point_covered)
-        
-        if len(missing_indices) > 0:
-            # Build a map of point_index -> list of simplex_indices
-            vertex_to_simplices = [[] for _ in range(len(points_array))]
-            for idx, simplex in enumerate(tri.simplices):
-                for v in simplex:
-                    vertex_to_simplices[v].append(idx)
+        # If not all points covered
+        if len(covered_vertices) < len(points_array):
+            all_indices = np.arange(len(points_array))
+            missing_indices = np.setdiff1d(all_indices, covered_vertices, assume_unique=True)
             
-            for p_idx in missing_indices:
-                incident_simplices = vertex_to_simplices[p_idx]
-                if not incident_simplices:
-                    continue
+            if len(missing_indices) > 0:
+                # We need: for each missing vertex v, find simplex s incident to v with min(circum_r[s])
+                # Data structures:
+                # simplex_ids: [0,0,0, 1,1,1, ...]
+                # vertex_ids:  [v1,v2,v3, v4,v5,v6, ...]
+                # radii:       [r0,r0,r0, r1,r1,r1, ...]
                 
-                # Find the incident simplex with minimal circumradius
-                # We filter only triangles that have finite radius (valid polygons)
-                valid_incidents = [i for i in incident_simplices if np.isfinite(circum_r[i])]
+                num_simplices = len(tri.simplices)
+                simplex_ids = np.repeat(np.arange(num_simplices), 3)
+                vertex_ids = tri.simplices.flatten()
+                radii_expanded = np.repeat(circum_r, 3)
                 
-                if valid_incidents:
-                    best_simplex_idx = min(valid_incidents, key=lambda i: circum_r[i])
-                    # Force keep this triangle
-                    keep_indices[best_simplex_idx] = True
+                # Filter valid finite triangles
+                valid_mask = np.isfinite(radii_expanded)
+                vertex_ids = vertex_ids[valid_mask]
+                simplex_ids = simplex_ids[valid_mask]
+                radii_vals = radii_expanded[valid_mask]
+                
+                # Sort by vertex then radius
+                sort_idx = np.lexsort((radii_vals, vertex_ids))
+                
+                sorted_vertices = vertex_ids[sort_idx]
+                sorted_simplices = simplex_ids[sort_idx]
+                
+                # Group by vertex, take first (min radius)
+                unique_v, unique_indices = np.unique(sorted_vertices, return_index=True)
+                best_simplices = sorted_simplices[unique_indices]
+                
+                # Filter for only the missing vertices
+                # unique_v is sorted, so is missing_indices.
+                # Use searchsorted or isin
+                mask_needed = np.isin(unique_v, missing_indices)
+                simplices_to_add = best_simplices[mask_needed]
+                
+                keep_indices[simplices_to_add] = True
 
-        # ---------------------------------------------------------
-        # CONNECTIVITY: Ensure single component using Minimum Spanning Tree
-        # ---------------------------------------------------------
+        # --- Optimization Step 7: Simplify Connectivity (Vectorized Graph) ---
         if np.any(keep_indices):
             num_tri = len(tri.simplices)
-            rows, cols, data = [], [], []
-
-            # Build dual graph of triangles
-            for i in range(num_tri):
-                # Optimization: only consider finite triangles as valid nodes in our graph
-                # If a triangle is infinite (collinear), we effectively remove it
-                if not np.isfinite(circum_r[i]):
-                     continue
-                     
-                for neighbor in tri.neighbors[i]:
-                    if neighbor == -1 or neighbor < i:
-                        continue
-                    if not np.isfinite(circum_r[neighbor]):
-                         continue
-                    
-                    # Weight logic: "Cost" to traverse. 
-                    # If triangle is already kept, cost is 0. Else cost is its radius.
-                    # Edge weight = max cost of the two triangles.
-                    # This ensures we prefer paths through kept regions (0 cost) 
-                    # and minimize the "widest" gap we must bridge.
-                    cost_i = 0 if keep_indices[i] else circum_r[i]
-                    cost_n = 0 if keep_indices[neighbor] else circum_r[neighbor]
-                    w = max(cost_i, cost_n)
-                    
-                    rows.append(i)
-                    cols.append(neighbor)
-                    data.append(w)
             
-            if rows:
-                # Compute MST of the triangle graph
-                graph_matrix = csr_matrix((data, (rows, cols)), shape=(num_tri, num_tri))
+            # Construct Edge List from neighbors
+            # tri.neighbors: (N, 3). -1 means no neighbor.
+            src = np.repeat(np.arange(num_tri), 3)
+            dst = tri.neighbors.flatten()
+            
+            # Filter valid and directed (dst > src) to avoid duplicates
+            valid_edges = (dst != -1) & (dst > src)
+            s = src[valid_edges]
+            d = dst[valid_edges]
+            
+            # Note: We do NOT filter infinite circumradius triangles here.
+            # Allowing them is crucial to maintain connectivity (acting as bridges)
+            # even if they are degenerate.
+            
+            if len(s) > 0:
+                # Weights: max(cost[u], cost[v])
+                # Cost is 0 if kept, else radius
+                costs = np.where(keep_indices, 0.0, circum_r)
+                w = np.maximum(costs[s], costs[d])
+                
+                # Build MST using scipy
+                graph_matrix = csr_matrix((w, (s, d)), shape=(num_tri, num_tri))
                 mst = minimum_spanning_tree(graph_matrix)
                 
-                # Convert MST to adjacency list
+                # Pruning Logic
                 mst_coo = mst.tocoo()
-                mst_adj = [set() for _ in range(num_tri)]
-                degrees = np.zeros(num_tri, dtype=int)
                 
-                for r, c in zip(mst_coo.row, mst_coo.col):
-                    mst_adj[r].add(c)
-                    mst_adj[c].add(r)
-                    degrees[r] += 1
-                    degrees[c] += 1
+                # Calculate degrees
+                # np.bincount is fast for 0..N integers
+                degrees = np.bincount(mst_coo.row, minlength=num_tri) + \
+                          np.bincount(mst_coo.col, minlength=num_tri)
                 
-                # Pruning: Remove leaves that are NOT in original 'keep_indices'
-                # This trims the MST back to the minimal structure connecting the original components
+                # Adjacency list for traversal
+                adj = [set() for _ in range(num_tri)]
+                for u, v in zip(mst_coo.row, mst_coo.col):
+                    adj[u].add(v)
+                    adj[v].add(u)
+                
+                # Iterative Pruning
+                # Leaves that are not originally kept
+                # 0-degree nodes (isolated) are dealt with later (keep if originally kept)
                 leaves = [i for i in range(num_tri) if degrees[i] == 1 and not keep_indices[i]]
-                queue = leaves[:]
                 
                 eliminated = np.zeros(num_tri, dtype=bool)
-                idx = 0
-                while idx < len(queue):
-                    leaf = queue[idx]
-                    idx += 1
-                    eliminated[leaf] = True
+                queue = leaves
+                q_idx = 0
+                
+                while q_idx < len(queue):
+                    u = queue[q_idx]
+                    q_idx += 1
+                    eliminated[u] = True
                     
-                    for neighbor in mst_adj[leaf]:
-                        if not eliminated[neighbor]:
-                            degrees[neighbor] -= 1
-                            if degrees[neighbor] == 1 and not keep_indices[neighbor]:
-                                queue.append(neighbor)
+                    # Neighbor
+                    # In a tree, if degree was 1, there is exactly 1 neighbor in adj[u]
+                    # But we must check if neighbor is not already eliminated (unlikely in tree traversal from leaves but safe)
+                    for v in adj[u]:
+                        if not eliminated[v]:
+                            degrees[v] -= 1
+                            if degrees[v] == 1 and not keep_indices[v]:
+                                queue.append(v)
+            
+                # Update keep_indices
+                # A node is kept if: 
+                # 1. It was originally kept
+                # 2. It is in the MST and NOT eliminated (bridge)
                 
-                # Update keep_indices: Anything connected in the pruned MST (that isn't eliminated)
-                # Note: We must also safeguard against triangles that were completely disconnected in the graph (degree 0)
-                # Degree 0 nodes in MST are either isolated components (which keep_indices accounts for)
-                # or nodes that were eliminated.
+                # Identify nodes in MST (degree > 0 in original MST)
+                initial_degrees = np.bincount(mst_coo.row, minlength=num_tri) + \
+                                  np.bincount(mst_coo.col, minlength=num_tri)
+                in_mst = initial_degrees > 0
                 
-                # Actually, simpler:
-                # The final set is (Original Kept) UNION (Intermediate Nodes in Pruned MST).
-                # Intermediate nodes are those that were NOT eliminated.
-                # However, nodes that were not in the graph at all (infinite triangles) are not eliminated but 
-                # also not reachable.
-                # So we just say: if 'eliminated' is false AND it was part of the finite graph?
-                # Actually, 'eliminated' defaults to False.
-                # If a node was NEVER in the MST (isolated, keep_indices=False), it has degree 0.
-                # It won't be in 'leaves' initially.
-                # Wait. Isolated nodes with keep_indices=False are simply not interesting.
-                # Isolated nodes with keep_indices=True must be kept.
-                # Nodes in MST that are NOT eliminated are the bridges + original nodes.
-                
-                # Correct logic:
-                # 1. Any node originally in keep_indices MUST be kept (force kept).
-                # 2. Any node not eliminated by the pruning process should be kept IF can be reached?
-                # Actually, standard pruning logic says "Remove only if leaf and bad".
-                # An isolated "bad" node is a leaf (degree 0). It should be removed.
-                # So we need to handle degree 0 "bad" nodes too.
-                
-                bad_nodes = [i for i in range(num_tri) if not keep_indices[i]]
-                for i in bad_nodes:
-                    if degrees[i] == 0:
-                        eliminated[i] = True
-                        
-                keep_indices = keep_indices | (~eliminated)
-                # Ensure we don't accidentally include infinite triangles if our logic was loose
-                keep_indices = keep_indices & np.isfinite(circum_r)
-
-        # If filtering removed everything, or resulted in empty set
+                # Add bridges
+                keep_indices = keep_indices | (in_mst & ~eliminated)
+            
+        # Final validity check: removed to allow infinite radius bridge triangles
+        # keep_indices = keep_indices & np.isfinite(circum_r)
+        
+        # 8. Fallback to Convex Hull if empty
         if not np.any(keep_indices):
-            # Fallback to Convex Hull
-            hull = ConvexHull(points_array)
-            hull_points = points_array[hull.vertices]
-            return [[[float(p[0]), float(p[1])] for p in hull_points]]
+            return _fallback_convex(points_array, cache_key)
             
         kept_triangles = triangles[keep_indices]
-        polys = [Polygon(t) for t in kept_triangles]
         
-        # Union the triangles
-        concave_hull = unary_union(polys)
+        # Merge triangles
+        # polys = [Polygon(t) for t in kept_triangles]
+        # concave_hull = unary_union(polys)
         
-        # Extract coordinates
-        coords = []
-        if isinstance(concave_hull, Polygon):
-            coords = list(concave_hull.exterior.coords)
-            if len(coords) > 1 and coords[0] == coords[-1]:
-                coords = coords[:-1]
-            return [[[float(p[0]), float(p[1])] for p in coords]]
-        elif isinstance(concave_hull, MultiPolygon):
-             polys_coords = []
-             for poly in concave_hull.geoms:
-                 coords = list(poly.exterior.coords)
-                 if len(coords) > 1 and coords[0] == coords[-1]:
-                    coords = coords[:-1]
-                 polys_coords.append([[float(p[0]), float(p[1])] for p in coords])
-             return polys_coords
-        elif isinstance(concave_hull, GeometryCollection):
-             polys_coords = []
-             for g in concave_hull.geoms:
-                 if isinstance(g, Polygon):
-                     coords = list(g.exterior.coords)
-                     if len(coords) > 1 and coords[0] == coords[-1]:
-                        coords = coords[:-1]
-                     polys_coords.append([[float(p[0]), float(p[1])] for p in coords])
-             if polys_coords:
-                 return polys_coords
+        # Optimized: Extract boundary edges directly
+        # kept_simplices = tri.simplices[keep_indices]
+        # But we need indices relative to points_array, which tri.simplices already provides.
+        res = _extract_boundary_edges_fast(tri.simplices[keep_indices], points_array)
+        
+        if not res:
+             # Fallback if fast extraction failed or produced nothing (e.g. no cycles found)
+             polys = [Polygon(t) for t in kept_triangles]
+             concave_hull = unary_union(polys)
+             res = _extract_multipolygon_coords(concave_hull)
+             
+        if not res:
+            return _fallback_convex(points_array, cache_key)
+            
+        _cache_result(cache_key, res)
+        return res
 
-        # Ensure we return valid coordinates
-        # Fallback
-        hull = ConvexHull(points_array)
-        hull_points = points_array[hull.vertices]
-        return [[[float(p[0]), float(p[1])] for p in hull_points]]
-        
     except Exception as e:
-        print(f"Concave hull computation failed: {e}. Using convex hull fallback.")
-        try:
-             hull = ConvexHull(points_array)
-             hull_points = points_array[hull.vertices]
-             return [[[float(p[0]), float(p[1])] for p in hull_points]]
-        except:
-             return [[[float(p[0]), float(p[1])] for p in unique_points]]
+        print(f"Concave hull failed: {e}")
+        return _fallback_convex(points_array, cache_key)
 
-def compute_cluster_hulls(clusters, alpha: float | None = 1.0, auto_alpha_quantile=0.95):
+def _fallback_convex(points_array, cache_key):
+    try:
+        hull = ConvexHull(points_array)
+        res = [[[float(p[0]), float(p[1])] for p in points_array[hull.vertices]]]
+        _cache_result(cache_key, res)
+        return res
+    except:
+        return [[[float(p[0]), float(p[1])] for p in points_array]]
+
+def _extract_boundary_edges_fast(triangles_indices, points_array):
+    """
+    Extracts the boundary polygon(s) from a set of triangle indices.
+    This avoids shapely.ops.unary_union which is slow for many polygons.
+    """
+    # Create array of sorted edges: (N, 3, 2)
+    # Each triangle has 3 edges. We sort vertex indices per edge to handle (u,v) == (v,u)
+    edges = np.sort(np.vstack([
+        triangles_indices[:, [0, 1]],
+        triangles_indices[:, [1, 2]],
+        triangles_indices[:, [2, 0]]
+    ]), axis=1)
+    
+    # We turn rows into structured array or view to use unique
+    # A fast way to find unique rows for integer arrays:
+    # Convert to void type or allow numpy to sort rows directly
+    # edges is (M, 2).
+    
+    # Pack edges into 64-bit integers if indices < 2^32 for speed (assuming indices fit)
+    # Or just use row sorting
+    
+    # Lexsort: sort by col 0, then col 1
+    order = np.lexsort((edges[:, 1], edges[:, 0]))
+    sorted_edges = edges[order]
+    
+    # Identify unique edges and their counts
+    # diff between adjacent rows
+    diff = np.diff(sorted_edges, axis=0)
+    # check where diff is non-zero (i.e., new edge)
+    # diff is (M-1, 2). If any col is non-zero, it's a change
+    is_new = np.any(diff != 0, axis=1)
+    is_new = np.concatenate(([True], is_new, [True])) # Sentinels
+    
+    # Indices where changes occur
+    change_indices = np.flatnonzero(is_new)
+    
+    # Counts are differences between change indices
+    counts = np.diff(change_indices)
+    
+    # Unique edges are at change_indices[:-1]
+    unique_edges = sorted_edges[change_indices[:-1]]
+    
+    # Boundary edges appear exactly once (or odd times if geometry is weird, but for valid triangulation, 1 means boundary, 2 means internal)
+    # Actually, in 2D Delaunay, edges are shared by at most 2 triangles. 
+    # 1 = boundary
+    # 2 = internal
+    boundary_mask = (counts == 1)
+    boundary_edges = unique_edges[boundary_mask]
+    
+    if len(boundary_edges) == 0:
+        return []
+        
+    return _stitch_edges(boundary_edges, points_array)
+
+def _stitch_edges(edges, points_array):
+    """
+    Stitches a list of (u, v) edges into loops (polygons).
+    """
+    # Build adjacency list
+    adj = {}
+    for u, v in edges:
+        if u not in adj: adj[u] = []
+        if v not in adj: adj[v] = []
+        adj[u].append(v)
+        adj[v].append(u)
+        
+    # Traverse to find loops
+    polygons = []
+    visited_edges = set()
+    
+    # We need to handle the fact that we might have disjoint loops (holes or islands)
+    # For a simple polygon, we can just walk.
+    # Note: Orientation matters for holes vs islands, but we just return coords here.
+    
+    for start_node in adj:
+        if not adj[start_node]:
+            continue
+            
+        # Try to find a loop starting from here
+        # Eagerly pick a neighbor that hasn't been traversed
+        
+        # We need to track directed edges to avoid going back and forth?
+        # A simple valid boundary traversal: preserve direction from triangulation?
+        # We lost directionality in the edge sorting (u<v).
+        # But we can reconstruct:
+        # Just walking the graph of boundary edges should produce cycles.
+        # Since every node in a valid 2-manifold boundary has degree 2 (or even), 
+        # we can just walk.
+        # If the union of triangles is a single component (enforced by MST), we usually get one outer loop + holes.
+        
+        # We use a set of visited nodes is NOT enough because a node can be part of multiple loops (touching at a vertex).
+        # We need visited EDGES.
+        pass
+        
+    # Simplified Graph Traversal
+    # Convert edges to set for O(1) lookup
+    edge_set = set(tuple(sorted((u, v))) for u, v in edges)
+    
+    loops = []
+    
+    while edge_set:
+        # Start a new loop
+        u, v = next(iter(edge_set)) # Arbitrary start edge
+        edge_set.remove((u, v) if (u, v) in edge_set else (v, u))
+        
+        loop_coords = [points_array[u], points_array[v]]
+        curr = v
+        start = u
+        
+        while curr != start:
+            # Find neighbor of curr in remaining edges
+            found = False
+            # Check neighbors of curr
+            # Optimization: looking up in adj is faster than iterating edge_set
+            # But we need to keep adj in sync or just check simple possibilities?
+            # Creating a full graph is safer.
+            pass
+            break # Fallback to slower robust construction below
+            
+        loops.append(loop_coords)
+       
+    # --- Robust Graph Construction for Stitching ---
+    import networkx as nx
+    G = nx.Graph()
+    G.add_edges_from(edges)
+    
+    # Extract cycles
+    # For a set of polygons, the boundary is a set of cycles.
+    # nx.cycle_basis might give internal cycles which we don't want.
+    # We want simple connected components of the boundary graph.
+    # Since every node has degree 2 (ideally), components are just cycles.
+    
+    loops_coords = []
+    try:
+        # Get connected components of the edge graph
+        components = list(nx.connected_components(G))
+        for comp in components:
+            if len(comp) < 3: continue
+            
+            # Subgraph for this component
+            subg = G.subgraph(comp)
+            
+            # An Eulerian circuit exists if all degrees are even.
+            # In a boundary graph, degrees should be 2.
+            # If so, find cycle.
+            try:
+                cycle = list(nx.find_cycle(subg))
+                # Cycle is list of edges (u,v). Extract vertices.
+                path = [cycle[0][0]]
+                for _, v in cycle:
+                    path.append(v)
+                    
+                loops_coords.append([ [float(points_array[i][0]), float(points_array[i][1])] for i in path ])
+            except:
+                pass
+    except:
+        pass
+        
+    return loops_coords
+
+
+def _extract_multipolygon_coords(geom):
+    coords_list = []
+    if isinstance(geom, Polygon):
+        geoms = [geom]
+    elif isinstance(geom, (MultiPolygon, GeometryCollection)):
+        geoms = geom.geoms
+    else:
+        return []
+        
+    for poly in geoms:
+        if isinstance(poly, Polygon):
+            c = list(poly.exterior.coords)
+            if len(c) > 1 and c[0] == c[-1]: c = c[:-1]
+            coords_list.append([[float(p[0]), float(p[1])] for p in c])
+            
+    return coords_list
+
+# --- Optimization Step 6: Parallel Execution ---
+def _compute_hull_wrapper(args):
+    """Wrapper for parallel execution"""
+    points, alpha, quantile = args
+    return get_alpha_shape(points, alpha=alpha, auto_alpha_quantile=quantile)
+
+def compute_cluster_hulls(clusters, alpha: float | None = 1.0, auto_alpha_quantile=0.95, max_workers=None):
     """
     Computes alpha shapes for a list of clusters.
-    Returns a list of hulls (each hull is a LIST OF POLYGONS, where each polygon is a list of [lat, lon]).
-    Note: The return type changed to support MultiPolygons.
     """
-    hulls = []
+    clean_clusters = []
     for cluster in clusters:
         coords = []
         for p in cluster:
@@ -269,15 +490,21 @@ def compute_cluster_hulls(clusters, alpha: float | None = 1.0, auto_alpha_quanti
                 coords.append([lat, lon])
             else:
                 coords.append(p)
-        
-        if not coords:
-            continue
-            
-        hull_polys = get_alpha_shape(coords, alpha=alpha, auto_alpha_quantile=auto_alpha_quantile)
-        # Flatten the list of polygons into the hulls list
-        # NO. We want to keep each cluster associated with its geometry.
-        # But Visualisation.draw_cluster handles one geometry object at a time.
-        # If we pass a list of polygons (list of list of points), Folium treats it as MultiPolygon.
-        # So we just append the result of get_alpha_shape directly.
-        hulls.append(hull_polys)
-    return hulls
+        clean_clusters.append(coords)
+    
+    if not clean_clusters:
+        return []
+
+    # Only parallelize if we have enough work
+    if len(clean_clusters) < 5:
+        return [get_alpha_shape(c, alpha=alpha, auto_alpha_quantile=auto_alpha_quantile) if c else [] for c in clean_clusters]
+
+    if max_workers is None:
+        max_workers = min(multiprocessing.cpu_count(), 8)
+
+    tasks = [(c, alpha, auto_alpha_quantile) for c in clean_clusters]
+    
+    with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
+        results = list(executor.map(_compute_hull_wrapper, tasks))
+
+    return results

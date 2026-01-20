@@ -80,5 +80,3 @@ def convert_to_dict_filtered():
 
 if __name__ == "__main__":
     convert_to_dict_filtered()
-
-convert_to_dict_filtered()

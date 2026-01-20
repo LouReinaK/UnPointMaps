@@ -28,6 +28,7 @@ class TestConfigManager:
         """Test loading valid configuration from .env file"""
         # Create temporary .env file with valid configuration
         with tempfile.NamedTemporaryFile(mode='w', suffix='.env', delete=False) as f:
+            f.write("LLM_PROVIDER=openrouter\n") # Force provider to be openrouter
             f.write("OPENROUTER_API_KEY=sk-valid_api_key_12345678901234567890\n")
             f.write("DEFAULT_LLM_MODEL=mistralai/mistral-7b-instruct\n")
             f.write("API_TIMEOUT=30\n")
@@ -355,7 +356,7 @@ class TestLLMLabelingService:
         finally:
             os.unlink(env_path)
     
-    @patch('llm_labelling.OpenRouterAPIClient.call_llm_api')
+    @patch('src.processing.llm_labelling.OpenRouterAPIClient.call_llm_api')
     def test_complete_labeling_workflow(self, mock_api_call):
         """Test complete labeling workflow with mocked API"""
         # Setup mock API response
@@ -393,12 +394,74 @@ class TestLLMLabelingService:
             # Verify result structure
             assert isinstance(result, LabelResult)
             assert result.label == 'Eiffel Tower Paris Landmark'
-            assert result.confidence > 0
             assert result.processing_info['model_used'] == 'mistralai/mistral-7b-instruct'
             assert 'total_processing_time' in result.timing
             
         finally:
             os.unlink(env_path)
+
+    @patch('src.processing.llm_labelling.DatabaseManager')
+    def test_caching_behavior(self, MockDatabaseManager):
+        """Test that caching is used correctly"""
+        # Create temporary .env file
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.env', delete=False) as f:
+            f.write("OPENROUTER_API_KEY=sk-valid_api_key_12345678901234567890\n")
+            env_path = f.name
+        
+        try:
+            config_manager = ConfigManager(env_path)
+            
+            # Setup Mock DB Manager instance
+            mock_db_instance = MockDatabaseManager.return_value
+            mock_db_instance.get_cached_llm_label.return_value = None # Cache miss first
+            
+            service = LLMLabelingService(config_manager)
+            
+            # Mock API client to avoid real calls
+            service.api_client.call_llm_api = MagicMock(return_value={
+                'content': 'Generated Label',
+                'model': 'test-model',
+                'tokens': {'prompt_tokens': 10, 'completion_tokens': 5, 'total_tokens': 15},
+                'timing': {'llm_response_time': 0.5}
+            })
+            
+            input_data = {
+                "cluster_id": "test_cluster",
+                "image_ids": ["img1"],
+                "text_metadata": ["test text"],
+                "cluster_size": 1
+            }
+            
+            # 1. Test Cache Miss
+            result = service.generate_cluster_label(input_data)
+            
+            assert result.label == 'Generated Label'
+            # Verify cache get called
+            mock_db_instance.get_cached_llm_label.assert_called_once()
+            # Verify cache save called
+            mock_db_instance.save_cached_llm_label.assert_called_once()
+            
+            # 2. Test Cache Hit
+            # Setup mock to return cached data
+            mock_db_instance.get_cached_llm_label.return_value = {
+                'label': 'Cached Label',
+                'processing_info': {},
+                'timing': {}
+            }
+            mock_db_instance.get_cached_llm_label.reset_mock()
+            mock_db_instance.save_cached_llm_label.reset_mock()
+            service.api_client.call_llm_api.reset_mock()
+            
+            result_cached = service.generate_cluster_label(input_data)
+            
+            assert result_cached.label == 'Cached Label'
+            mock_db_instance.get_cached_llm_label.assert_called_once()
+            # Verify API NOT called
+            service.api_client.call_llm_api.assert_not_called()
+            
+        finally:
+            if os.path.exists(env_path):
+                os.unlink(env_path)
 
 
 class TestErrorHandling:
@@ -407,7 +470,7 @@ class TestErrorHandling:
     def test_error_handling_function(self):
         """Test centralized error handling function"""
         # Test different error types
-        from llm_labelling import ConfigurationError, InputValidationError, APICommunicationError
+        from src.processing.llm_labelling import ConfigurationError, InputValidationError, APICommunicationError
         
         # Test ConfigurationError
         error_info = handle_error(ConfigurationError("test error"), {"context": "test"})
@@ -436,7 +499,7 @@ class TestErrorHandling:
 class TestCompleteWorkflow:
     """Test the complete end-to-end workflow"""
     
-    @patch('llm_labelling.OpenRouterAPIClient.call_llm_api')
+    @patch('src.processing.llm_labelling.OpenRouterAPIClient.call_llm_api')
     def test_main_workflow_success(self, mock_api_call):
         """Test successful execution of main workflow"""
         # Setup mock API response
@@ -478,11 +541,9 @@ class TestCompleteWorkflow:
             
             # Verify result structure
             assert 'label' in result
-            assert 'confidence' in result
             assert 'processing_info' in result
             assert 'timing' in result
             assert result['label'] == 'Beautiful Paris Cityscape'
-            assert result['confidence'] > 0
             assert result['processing_info']['model_used'] == 'mistralai/mistral-7b-instruct'
             
         finally:
@@ -563,7 +624,6 @@ class TestSampleImageClusterMetadata:
             # Verify results
             assert isinstance(result, LabelResult)
             assert result.label == 'Eiffel Tower Paris Landmark'
-            assert result.confidence > 0.5  # Should have good confidence with relevant keywords
             assert result.processing_info['model_used'] == 'mistralai/mistral-7b-instruct'
             
         finally:

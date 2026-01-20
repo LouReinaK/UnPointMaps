@@ -11,6 +11,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pydantic import BaseModel, ValidationError
 from dotenv import load_dotenv
 import abc
+import hashlib  # Added for caching
+import json     # Added for caching
+
+from src.database.manager import DatabaseManager # Added for caching
 
 # Global Rate Limiter Configuration
 MAX_REQUESTS_PER_MINUTE = 1000  # Adjust this value to change the global rate limit
@@ -291,7 +295,7 @@ class ClusterMetadata(BaseModel):
     spatial_info: Optional[dict] = None  # Optional spatial characteristics
 
     class Config:
-        schema_extra = {
+        json_schema_extra = {
             "example": {
                 "cluster_id": "cluster_001",
                 "image_ids": ["img_001", "img_002", "img_003"],
@@ -312,15 +316,13 @@ class ClusterMetadata(BaseModel):
 class LabelResult(BaseModel):
     """Output data structure for label results"""
     label: str
-    confidence: float
     processing_info: dict
     timing: dict
 
     class Config:
-        schema_extra = {
+        json_schema_extra = {
             "example": {
                 "label": "Eiffel Tower Paris Landmark",
-                "confidence": 0.95,
                 "processing_info": {
                     "model_used": "mistralai/mistral-7b-instruct",
                     "prompt_tokens": 45,
@@ -791,6 +793,9 @@ class LLMLabelingService:
             )
         
         logger.info(f"LLMLabelingService initialized successfully (Provider: {provider})")
+
+        # Initialize Database Manager for Caching
+        self.db_manager = DatabaseManager()
     
     def validate_and_prepare_input(self, cluster_metadata: dict) -> ClusterMetadata:
         """
@@ -880,6 +885,14 @@ Your Label:"""
         
         return prompt
     
+    def _generate_cache_key(self, prompt: str, model: str, temperature: float) -> str:
+        """
+        Generate a unique cache key for the LLM request.
+        """
+        # Combine prompt and parameters
+        data = f"{prompt}_{model}_{temperature}"
+        return hashlib.md5(data.encode('utf-8')).hexdigest()
+
     def generate_cluster_label(self, cluster_metadata: dict,
                               max_tokens: int = 100,
                               temperature: float = 0.7) -> LabelResult:
@@ -909,6 +922,13 @@ Your Label:"""
             prompt = self.construct_labeling_prompt(validated_metadata)
             
             logger.debug(f"Generated prompt: {prompt[:200]}...")  # Log first 200 chars
+
+            # --- Caching Check ---
+            cache_key = self._generate_cache_key(prompt, self.config['model'], temperature)
+            cached_data = self.db_manager.get_cached_llm_label(cache_key)
+            if cached_data:
+                logger.info(f"Using cached label for cluster {validated_metadata.cluster_id}")
+                return LabelResult(**cached_data)
             
             # Step 3: Call LLM API
             llm_response = self.api_client.call_llm_api(
@@ -923,20 +943,13 @@ Your Label:"""
                 validated_metadata
             )
             
-            # Step 5: Validate and refine label
-            final_label, confidence = self._validate_and_refine_label(
-                processed_label,
-                validated_metadata
-            )
-            
             # Calculate total processing time
             total_processing_time = time.time() - start_time
             
-            # Create result object
-            result = LabelResult(
-                label=final_label,
-                confidence=confidence,
-                processing_info={
+            # Create result object data
+            result_data = {
+                'label': processed_label,
+                'processing_info': {
                     'model_used': llm_response['model'],
                     'prompt_tokens': llm_response['tokens']['prompt_tokens'],
                     'completion_tokens': llm_response['tokens']['completion_tokens'],
@@ -949,14 +962,20 @@ Your Label:"""
                         'label_validation'
                     ]
                 },
-                timing={
+                'timing': {
                     'total_processing_time': total_processing_time,
-                    'llm_response_time': llm_response['timing']['llm_response_time'],
-                    'pre_processing_time': llm_response['timing']['llm_response_time'] - total_processing_time
+                    'llm_response_time': llm_response.get('timing', {}).get('llm_response_time', 0),
+                    'pre_processing_time': 0
                 }
-            )
+            }
+
+            # Cache the result
+            self.db_manager.save_cached_llm_label(cache_key, result_data)
             
-            logger.info(f"Successfully generated label: {final_label}")
+            # Create result object
+            result = LabelResult(**result_data)
+            
+            logger.info(f"Successfully generated label: {processed_label}")
             return result
             
         except Exception as e:
@@ -1065,103 +1084,6 @@ Your Label:"""
             
         except Exception as e:
             raise PostProcessingError(f"Response processing failed: {str(e)}")
-    
-    def _validate_and_refine_label(self, label: str,
-                                   metadata: ClusterMetadata) -> tuple:
-        """
-        Validate and refine the generated label.
-        
-        Args:
-            label: Processed label string
-            metadata: Original cluster metadata
-            
-        Returns:
-            Tuple of (final_label, confidence_score)
-            
-        Raises:
-            PostProcessingError: If label validation fails
-        """
-        try:
-            # Basic validation
-            if not label or not isinstance(label, str):
-                raise PostProcessingError("Label is invalid or empty")
-            
-            # Calculate confidence based on label quality heuristics
-            confidence = self._calculate_label_confidence(label, metadata)
-            
-            # Apply refinements if needed
-            refined_label = self._apply_label_refinements(label, metadata)
-            
-            return refined_label, confidence
-            
-        except Exception as e:
-            raise PostProcessingError(f"Label validation failed: {str(e)}")
-    
-    def _calculate_label_confidence(self, label: str,
-                                   metadata: ClusterMetadata) -> float:
-        """
-        Calculate confidence score for generated label.
-        
-        Args:
-            label: Generated label string
-            metadata: Original cluster metadata
-            
-        Returns:
-            Confidence score between 0 and 1
-        """
-        # Base confidence based on label characteristics
-        confidence = 0.7  # Base confidence
-        
-        # Adjust based on label length (optimal length gets higher confidence)
-        label_length = len(label.split())
-        if 3 <= label_length <= 8:
-            confidence += 0.1
-        elif label_length < 3 or label_length > 12:
-            confidence -= 0.1
-        
-        # Check if label contains relevant keywords from metadata
-        metadata_text = ' '.join(metadata.text_metadata).lower()
-        label_lower = label.lower()
-        
-        # Extract keywords from metadata
-        metadata_keywords = set()
-        for text in metadata.text_metadata:
-            words = text.lower().split()
-            # Filter out common words
-            common_words = {'the', 'a', 'an', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'and', 'or'}
-            metadata_keywords.update(word for word in words if word not in common_words and len(word) > 2)
-        
-        # Check if any metadata keywords appear in label
-        label_words = set(label_lower.split())
-        keyword_matches = metadata_keywords.intersection(label_words)
-        
-        if keyword_matches:
-            # Higher confidence if label contains relevant keywords
-            keyword_coverage = len(keyword_matches) / len(metadata_keywords) if metadata_keywords else 0
-            confidence += min(keyword_coverage * 0.2, 0.15)
-        
-        # Ensure confidence is within bounds
-        return max(0.1, min(1.0, confidence))
-    
-    def _apply_label_refinements(self, label: str,
-                                metadata: ClusterMetadata) -> str:
-        """
-        Apply refinements to improve label quality.
-        
-        Args:
-            label: Generated label string
-            metadata: Original cluster metadata
-            
-        Returns:
-            Refined label string
-        """
-        # For now, return label as-is
-        # Future enhancements could include:
-        # - Synonym expansion
-        # - Grammar correction
-        # - Domain-specific refinements
-        return label
-
 
 def main_llm_labelling_workflow(cluster_metadata: dict, env_path: str = '.env') -> dict:
     """
@@ -1174,7 +1096,6 @@ def main_llm_labelling_workflow(cluster_metadata: dict, env_path: str = '.env') 
     Returns:
         Dictionary containing:
         - 'label': Final generated label
-        - 'confidence': Confidence score
         - 'processing_info': Detailed processing information
         - 'timing': Performance metrics
         

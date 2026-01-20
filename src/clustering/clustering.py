@@ -60,7 +60,7 @@ def find_optimal_k_silhouette(dataset: np.ndarray, k_range: range = range(2, 11)
 
 
 def kmeans_clustering(dataset: any, k: int = None, 
-                   method: str = "elbow") -> Tuple[List, int]:
+                   method: str = "elbow") -> Tuple[List, int, np.ndarray]:
     """
         Fonction principale de clustering avec k-means
         peut trouver le k optimal avec la méthode du coude ou du score de silhouette si k n'est pas fourni
@@ -88,7 +88,7 @@ def kmeans_clustering(dataset: any, k: int = None,
     for i, label in enumerate(labels):
         clusters[label].append(points_array[i].tolist())
         
-    return clusters, k
+    return clusters, k, labels
 
 
 def plot_k_distance(data, k):
@@ -254,7 +254,7 @@ if __name__ == "__main__":
     # Génère des points aléatoires
     sample_points = np.array([[np.random.uniform(-90, 90), np.random.uniform(-180, 180)] for _ in range(100)])
     
-    clustered_points, used_k = kmeans_clustering(sample_points)
+    clustered_points, used_k, labels = kmeans_clustering(sample_points)
     print(f"Clustering effectué avec k={used_k}")
     
     plot_clusters(clustered_points)

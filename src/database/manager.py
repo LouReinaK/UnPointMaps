@@ -34,7 +34,6 @@ class DatabaseManager:
                 run_id INTEGER,
                 cluster_index INTEGER,
                 label TEXT,
-                confidence REAL,
                 FOREIGN KEY (run_id) REFERENCES clustering_runs (id)
             )
         ''')
@@ -80,8 +79,93 @@ class DatabaseManager:
             )
         ''')
 
+        # Table for generic hull cache (key-value store)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS hull_cache (
+                cache_key TEXT PRIMARY KEY,
+                hull_data TEXT,
+                created_at TEXT
+            )
+        ''')
+
+        # Table for LLM label cache
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS llm_cache (
+                cache_key TEXT PRIMARY KEY,
+                label_data TEXT,
+                created_at TEXT
+            )
+        ''')
+
+        # Table for generic clustering results (labels array)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS clustering_results (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                params_hash TEXT,
+                dataset_hash TEXT,
+                labels_bytes BLOB,
+                created_at TEXT
+            )
+        ''')
+
         conn.commit()
         conn.close()
+
+    def get_cached_hull(self, key: str) -> Optional[List[List[List[float]]]]:
+        """Retrieve cached hull geometry."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.execute("SELECT hull_data FROM hull_cache WHERE cache_key = ?", (key,))
+            row = cursor.fetchone()
+            conn.close()
+            if row:
+                return json.loads(row[0])
+        except Exception as e:
+            pass # Fail silently on cache read error
+        return None
+
+    def save_cached_hull(self, key: str, hull_data: List[List[List[float]]]):
+        """Save hull geometry to cache."""
+        try:
+            serialized = json.dumps(hull_data)
+            timestamp = datetime.now().isoformat()
+            
+            conn = sqlite3.connect(self.db_path)
+            conn.execute(
+                "INSERT OR REPLACE INTO hull_cache (cache_key, hull_data, created_at) VALUES (?, ?, ?)", 
+                (key, serialized, timestamp)
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            pass # Fail silently on cache write error
+
+    def get_cached_llm_label(self, key: str) -> Optional[Dict[str, Any]]:
+        """Retrieve cached LLM label result."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.execute("SELECT label_data FROM llm_cache WHERE cache_key = ?", (key,))
+            row = cursor.fetchone()
+            conn.close()
+            
+            if row:
+                return json.loads(row[0])
+            return None
+        except Exception as e:
+            return None
+
+    def save_cached_llm_label(self, key: str, data: Dict[str, Any]):
+        """Save LLM label result to cache."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            conn.execute(
+                "INSERT OR REPLACE INTO llm_cache (cache_key, label_data, created_at) VALUES (?, ?, ?)",
+                (key, json.dumps(data), datetime.now().isoformat())
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            pass
 
     def _compute_params_hash(self, params: Dict[str, Any], dataset_signature: str) -> str:
         """Compute a consistent hash for parameters and dataset."""
@@ -279,3 +363,40 @@ class DatabaseManager:
             raise e
         finally:
             conn.close()
+
+    def get_cached_labels(self, params: Dict[str, Any], dataset_hash: str) -> Optional[np.ndarray]:
+        """Retrieve cached clustering labels."""
+        params_hash = self._compute_params_hash(params, dataset_hash)
+        conn = sqlite3.connect(self.db_path)
+        try:
+            cursor = conn.execute(
+                "SELECT labels_bytes FROM clustering_results WHERE params_hash = ? AND dataset_hash = ? ORDER BY id DESC LIMIT 1", 
+                (params_hash, dataset_hash)
+            )
+            row = cursor.fetchone()
+            if row:
+                return np.frombuffer(row[0], dtype=np.int32)
+        except Exception:
+            pass
+        finally:
+            conn.close()
+        return None
+
+    def save_cached_labels(self, params: Dict[str, Any], dataset_hash: str, labels: np.ndarray):
+        """Save clustering labels to cache."""
+        params_hash = self._compute_params_hash(params, dataset_hash)
+        timestamp = datetime.now().isoformat()
+        labels_bytes = labels.astype(np.int32).tobytes() 
+        
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute(
+                "INSERT INTO clustering_results (params_hash, dataset_hash, labels_bytes, created_at) VALUES (?, ?, ?, ?)",
+                (params_hash, dataset_hash, labels_bytes, timestamp)
+            )
+            conn.commit()
+        except Exception:
+            pass
+        finally:
+            conn.close()
+

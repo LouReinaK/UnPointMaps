@@ -2,7 +2,7 @@ import numpy as np
 from sklearn.cluster import DBSCAN
 from typing import List, Tuple
 
-def dbscan_clustering(dataset: any, eps: float = 0.3, min_samples: int = 5) -> Tuple[List[List[List[float]]], int]:
+def dbscan_clustering(dataset: any, eps: float = 0.3, min_samples: int = 5) -> Tuple[List[List[List[float]]], int, np.ndarray]:
     """
     Performs DBSCAN clustering on the dataset.
     
@@ -14,6 +14,7 @@ def dbscan_clustering(dataset: any, eps: float = 0.3, min_samples: int = 5) -> T
     Returns:
         clusters: A list of clusters, where each cluster is a list of points [lat, lon]. Noise points (label -1) are excluded.
         n_clusters: The number of clusters found (excluding noise).
+        labels: Array of cluster labels (-1 is noise).
     """
     
     # Data preparation
@@ -25,29 +26,38 @@ def dbscan_clustering(dataset: any, eps: float = 0.3, min_samples: int = 5) -> T
 
     # Apply DBSCAN
     # Using the parameters specified in the prompt
+    # Optimization: algorithm='kd_tree' is usually fastest for low-dimensional data (2D)
     db = DBSCAN(
         eps=eps,
         min_samples=min_samples,
         metric="euclidean",
-        algorithm="auto",   # 'auto', 'ball_tree', 'kd_tree', 'brute'
+        algorithm="kd_tree", 
+        leaf_size=40,       # Slightly larger leaf size can speed up tree queries
         n_jobs=-1           # use all cores
     ).fit(points_array)
     
     labels = db.labels_
     
     # Number of clusters in labels, ignoring noise if present.
-    n_clusters = len(set(labels)) - (1 if -1 in labels else 0)
+    unique_labels = set(labels)
+    if -1 in unique_labels:
+        unique_labels.remove(-1)
+    
+    n_clusters = len(unique_labels)
+    sorted_labels = sorted(list(unique_labels))
     
     # Organize points by cluster
-    # We will create a list of length n_clusters. 
-    # Since labels can be -1, 0, 1, ..., we need to map them to 0, 1, ... or just ignore -1.
-    # We will ignore noise (-1) for the main clusters list as typically noise isn't "a cluster" to draw a hull around.
+    # Optimization: Vectorized boolean indexing instead of iterating over all points
+    clusters = []
     
-    clusters = [[] for _ in range(n_clusters)]
-    
-    # We need to map label indices to 0..n_clusters-1
-    # Unique labels (sorted) might be [-1, 0, 1, 2] or [0, 1, 2]
-    # If -1 exists, 0 -> index 0
+    # Pre-calculate masks for speed if needed, but simple boolean indexing is usually fast enough
+    # and vastly faster than a python for-loop over N points
+    for label in sorted_labels:
+        # Extract all points belonging to this cluster at once
+        cluster_points = points_array[labels == label]
+        clusters.append(cluster_points.tolist())
+
+    return clusters, n_clusters, labels
     
     for i, label in enumerate(labels):
         if label != -1:

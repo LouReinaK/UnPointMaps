@@ -113,6 +113,124 @@ button#run-btn:hover {
     min-height: 50px;
 }
 
+/* Carousel Styles */
+#cluster-info-content {
+    margin-bottom: 15px;
+}
+
+#cluster-carousel-container {
+    margin-top: 15px;
+    border-top: 1px solid #eee;
+    padding-top: 15px;
+}
+
+.carousel-header h4 {
+    margin: 0 0 10px 0;
+    font-size: 1em;
+    color: #333;
+}
+
+.carousel-wrapper {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.carousel-main {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+}
+
+.carousel-image-container {
+    flex: 1;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    background: #f8f9fa;
+    border-radius: 4px;
+    min-height: 200px;
+    overflow: hidden;
+}
+
+.carousel-image {
+    max-width: 100%;
+    max-height: 200px;
+    object-fit: contain;
+    display: block;
+}
+
+.carousel-btn {
+    background: #007bff;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    width: 32px;
+    height: 32px;
+    font-size: 1.2em;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background-color 0.2s;
+}
+
+.carousel-btn:hover {
+    background: #0056b3;
+}
+
+.carousel-btn:disabled {
+    background: #ccc;
+    cursor: not-allowed;
+}
+
+.carousel-counter {
+    text-align: center;
+    font-size: 0.85em;
+    color: #666;
+    font-weight: 500;
+}
+
+.thumbnail-container {
+    display: flex;
+    gap: 5px;
+    justify-content: center;
+    flex-wrap: wrap;
+    min-height: 40px;
+}
+
+.thumbnail {
+    width: 40px;
+    height: 40px;
+    border: 2px solid transparent;
+    border-radius: 4px;
+    cursor: pointer;
+    object-fit: cover;
+    transition: border-color 0.2s;
+}
+
+.thumbnail:hover {
+    border-color: #007bff;
+}
+
+.thumbnail.active {
+    border-color: #0056b3;
+}
+
+/* Loading state */
+.carousel-image.loading {
+    opacity: 0.5;
+}
+
+/* Error state */
+.carousel-image.error {
+    background: #f8d7da;
+    color: #721c24;
+    padding: 20px;
+    text-align: center;
+}
+
 .cluster-label {
     background: rgba(255, 255, 255, 0.9);
     border: 1px solid #333;

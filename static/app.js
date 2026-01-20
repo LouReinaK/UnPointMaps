@@ -10,6 +10,12 @@ document.addEventListener('DOMContentLoaded', () => {
     let clusterLayers = {}; // id -> L.polygon
     let ws = null;
     let eventsData = [];
+    let pendingLabels = {}; // id -> label (for race conditions)
+    
+    // Carousel State
+    let currentClusterId = null;
+    let currentImageIndex = 0;
+    let clusterImages = [];
     
     // Initialize WebSocket
     function connectWS() {
@@ -23,9 +29,36 @@ document.addEventListener('DOMContentLoaded', () => {
         };
         
         ws.onmessage = (event) => {
-            const data = JSON.parse(event.data);
-            if (data.type === "label_update") {
-                updateLabel(data.cluster_id, data.label);
+            try {
+                const data = JSON.parse(event.data);
+                console.log("WS Message:", data.type, data);
+                
+                if (data.type === "label_update") {
+                    updateLabel(data.cluster_id, data.label);
+                } else if (data.type === "cluster_update") {
+                    renderClusters(data.clusters, true); // true = silent (no alert if empty)
+                } else if (data.type === "progress") {
+                    // ... existing progress logic ...
+                    const statusDiv = document.getElementById('status-display');
+                    const statusMsg = document.getElementById('status-message');
+                    const iterDiv = document.getElementById('iteration-display');
+                    
+                    if (statusDiv && statusMsg) {
+                        statusDiv.style.display = 'block';
+                        statusMsg.innerText = data.message;
+                        
+                        if (iterDiv) {
+                            if (data.iteration) {
+                                iterDiv.innerText = `Current Iteration: ${data.iteration}`;
+                                iterDiv.style.display = 'block';
+                            } else if (data.message.includes("Clustering complete")) {
+                                iterDiv.innerText = `Final Iteration Reached`;
+                            }
+                        }
+                    }
+                }
+            } catch (e) {
+                console.error("WS Error parsing message:", e);
             }
         };
         
@@ -121,6 +154,12 @@ document.addEventListener('DOMContentLoaded', () => {
             params.start_hour = parseInt(document.getElementById('hour-start').value);
             params.end_hour = parseInt(document.getElementById('hour-end').value);
         }
+
+        // Algo
+        const algoSelect = document.getElementById('algorithm-select');
+        if (algoSelect) {
+            params.algorithm = algoSelect.value;
+        }
         
         const excludeEvents = [];
         document.querySelectorAll('#events-list input:checked').forEach(cb => {
@@ -136,7 +175,13 @@ document.addEventListener('DOMContentLoaded', () => {
             });
             const result = await resp.json();
             
-            renderClusters(result.clusters);
+            if (result.status === "started") {
+                console.log("Clustering started in background...");
+                // Optionally clear map to indicate start
+                renderClusters([], true);
+            } else {
+                renderClusters(result.clusters);
+            }
             
         } catch (e) {
             console.error("Cluster error", e);
@@ -147,13 +192,13 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
     
-    function renderClusters(clusters) {
+    function renderClusters(clusters, silent = false) {
         // Clear existing
         Object.values(clusterLayers).forEach(l => map.removeLayer(l));
         clusterLayers = {};
         
         if (clusters.length === 0) {
-            alert("No clusters found with current filters.");
+            if (!silent) alert("No clusters found with current filters.");
             return;
         }
         
@@ -169,25 +214,30 @@ document.addEventListener('DOMContentLoaded', () => {
                 weight: 1
             }).addTo(map);
             
-            polygon.bindTooltip(`Cluster ${c.id} (Loading...)`, {
-                permanent: true, 
-                direction: 'center',
-                className: 'cluster-label'
-            });
+            // polygon.bindTooltip(`Cluster ${c.id} (Loading...)`, {
+            //     permanent: true, 
+            //     direction: 'center',
+            //     className: 'cluster-label'
+            // });
             
             polygon.on('click', () => {
                 prioritizeCluster(c.id);
-                document.getElementById('cluster-info').innerHTML = `
-                    <h3>Cluster ${c.id}</h3>
-                    <p>Size: ${c.size} points</p>
-                    <p>Label: <strong>Loading...</strong></p>
-                `;
+                displayClusterInfo(c.id, c.size);
+                fetchClusterImages(c.id);
             });
             
             // Store for updates
             // Add custom property to layer to store label
             polygon._clusterId = c.id;
-            polygon._currentLabel = "Loading...";
+            
+            // Check pending labels
+            if (pendingLabels[c.id]) {
+                polygon._currentLabel = pendingLabels[c.id];
+                polygon.setTooltipContent(pendingLabels[c.id]);
+                // Remove from pending? Maybe keep it for safety or just depend on layer property
+            } else {
+                polygon._currentLabel = "Loading...";
+            }
             
              // Expand bounds
             c.points.forEach(p => bounds.extend(p));
@@ -195,24 +245,37 @@ document.addEventListener('DOMContentLoaded', () => {
             clusterLayers[c.id] = polygon;
         });
         
+        // Cleanup old pending labels that didn't match (optional)
+        // pendingLabels = {}; 
+        
         map.fitBounds(bounds);
     }
     
     function updateLabel(clusterId, label) {
+        console.log("Updating label for", clusterId, ":", label);
+        // Normalize ID to string for lookup
         const poly = clusterLayers[clusterId];
+        
         if (poly) {
             poly._currentLabel = label;
             poly.setTooltipContent(label);
             
-            // If this is the currently selected cluster info
-            const infoDiv = document.getElementById('cluster-info');
-            if (infoDiv.innerHTML.includes(`Cluster ${clusterId}`)) {
-                 // lazy update using regex or DOM assumption
-                 // Easier: just let the user click again or use data binding
-                 // But let's try to update text
-                 const b = infoDiv.querySelector('strong');
-                 if(b) b.innerText = label;
+            // Normalize for comparison
+            if (String(currentClusterId) === String(clusterId)) {
+                console.log("Updating displayed info for", clusterId);
+                const infoContent = document.getElementById('cluster-info-content');
+                // We need to match the specific DOM structure created in displayClusterInfo
+                // Note: displayClusterInfo creates <p>Label: <strong>...</strong></p>
+                const labelElement = infoContent.querySelector('p strong'); 
+                if (labelElement) {
+                    labelElement.innerText = label;
+                } else {
+                    console.warn("Label element not found in DOM");
+                }
             }
+        } else {
+             console.warn("Cluster layer not found for id:", clusterId, " - queuing as pending.");
+             pendingLabels[clusterId] = label;
         }
     }
     
@@ -222,6 +285,132 @@ document.addEventListener('DOMContentLoaded', () => {
             action: "prioritize",
             cluster_id: clusterId
         }));
+    }
+    
+    function displayClusterInfo(clusterId, size) {
+        currentClusterId = clusterId;
+        currentImageIndex = 0;
+        
+        const infoContent = document.getElementById('cluster-info-content');
+        const carouselContainer = document.getElementById('cluster-carousel-container');
+        
+        // Ensure we handle non-existent layer gracefully
+        const label = (clusterLayers[clusterId] && clusterLayers[clusterId]._currentLabel) || "Loading...";
+        
+        infoContent.innerHTML = `
+            <h3>Cluster ${clusterId}</h3>
+            <p>Size: ${size} points</p>
+            <p>Label: <strong>${label}</strong></p>
+        `;
+        
+        // Show loading state for carousel
+        carouselContainer.style.display = 'block';
+        document.getElementById('carousel-counter').textContent = 'Loading images...';
+        document.getElementById('thumbnail-container').innerHTML = '';
+        document.getElementById('carousel-image').src = '';
+        document.getElementById('carousel-image').alt = 'Loading...';
+    }
+    
+    async function fetchClusterImages(clusterId) {
+        try {
+            const response = await fetch(`/api/cluster_images?cluster_id=${clusterId}`);
+            const data = await response.json();
+            
+            if (data.images && data.images.length > 0) {
+                clusterImages = data.images;
+                displayCarousel();
+            } else {
+                document.getElementById('carousel-counter').textContent = 'No images available for this cluster';
+                document.getElementById('thumbnail-container').innerHTML = '';
+            }
+        } catch (error) {
+            console.error('Error fetching cluster images:', error);
+            document.getElementById('carousel-counter').textContent = 'Error loading images';
+        }
+    }
+    
+    function displayCarousel() {
+        if (clusterImages.length === 0) return;
+        
+        const imageElement = document.getElementById('carousel-image');
+        const counterElement = document.getElementById('carousel-counter');
+        const prevBtn = document.getElementById('prev-btn');
+        const nextBtn = document.getElementById('next-btn');
+        const thumbnailContainer = document.getElementById('thumbnail-container');
+        
+        const currentImg = clusterImages[currentImageIndex];
+        
+        // Update main image
+        imageElement.src = currentImg.url;
+        imageElement.alt = `Cluster ${currentClusterId} image ${currentImageIndex + 1}`;
+        
+        // Add link behavior
+        if (currentImg.page_url) {
+            imageElement.style.cursor = 'pointer';
+            imageElement.onclick = () => window.open(currentImg.page_url, '_blank');
+            imageElement.title = "Click to open on Flickr";
+        } else {
+            imageElement.style.cursor = 'default';
+            imageElement.onclick = null;
+            imageElement.removeAttribute('title');
+        }
+        
+        // Update counter
+        counterElement.textContent = `${currentImageIndex + 1} / ${clusterImages.length}`;
+        
+        // Update button states
+        prevBtn.disabled = currentImageIndex === 0;
+        nextBtn.disabled = currentImageIndex === clusterImages.length - 1;
+        
+        // Generate thumbnails
+        thumbnailContainer.innerHTML = '';
+        clusterImages.forEach((imgObj, index) => {
+            const thumb = document.createElement('img');
+            thumb.src = imgObj.url;
+            thumb.className = 'thumbnail';
+            if (index === currentImageIndex) {
+                thumb.classList.add('active');
+            }
+            thumb.addEventListener('click', () => {
+                currentImageIndex = index;
+                displayCarousel();
+            });
+            thumbnailContainer.appendChild(thumb);
+        });
+        
+        // Add event listeners for navigation buttons
+        prevBtn.onclick = () => {
+            if (currentImageIndex > 0) {
+                currentImageIndex--;
+                displayCarousel();
+            }
+        };
+        
+        nextBtn.onclick = () => {
+            if (currentImageIndex < clusterImages.length - 1) {
+                currentImageIndex++;
+                displayCarousel();
+            }
+        };
+        
+        // Add keyboard navigation
+        document.addEventListener('keydown', handleKeyboardNavigation);
+    }
+    
+    function handleKeyboardNavigation(e) {
+        if (!currentClusterId) return;
+        
+        if (e.key === 'ArrowLeft') {
+            if (currentImageIndex > 0) {
+                currentImageIndex--;
+                displayCarousel();
+            }
+        } else if (e.key === 'ArrowRight') {
+            if (currentImageIndex < clusterImages.length - 1) {
+                currentImageIndex++;
+                displayCarousel();
+            }
+        }
     }
     
     function getRandomColor() {
