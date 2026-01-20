@@ -1,10 +1,8 @@
 # remove non-significant words from text data
 import pandas as pd
-import re       
 from nltk.corpus import stopwords
 from nltk.tokenize import word_tokenize
-from processing.dataset_filtering import convert_to_dict_filtered
-import langdetect
+from .dataset_filtering import convert_to_dict_filtered
 from langdetect import detect, DetectorFactory
 from collections import Counter
 
@@ -35,10 +33,12 @@ LANGUAGE_MAPPING = {
     'nl': 'dutch',
 }
 
+
 def get_stopwords_for_language(lang_code):
     """Retourne les stopwords pour une langue donnée"""
     lang_name = LANGUAGE_MAPPING.get(lang_code, 'english')
     return STOPWORDS_DICT.get(lang_name, STOPWORDS_DICT['english'])
+
 
 def detect_language(text):
     """Détecte la langue d'un texte"""
@@ -47,33 +47,41 @@ def detect_language(text):
             return 'en'
         lang = detect(str(text))
         return lang
-    except:
+    except Exception:
         return 'en'  # Par défaut, anglais
+
 
 def remove_nonsignificant_words_multilang(text):
     """Supprime les stopwords basés sur la langue détectée"""
     try:
         if pd.isna(text) or text == '':
             return ''
-        
+
         text_str = str(text)
         lang = detect_language(text_str)
         stop_words = get_stopwords_for_language(lang)
-        
+
         # Tokenize the text
-        words = word_tokenize(text_str, language='french')  # Tokenization par défaut
+        # Tokenization par défaut
+        # Get language name for word_tokenize
+        lang_name = LANGUAGE_MAPPING.get(lang, 'french')
+        words = word_tokenize(text_str, language=lang_name)
         # Remove stop words
-        filtered_words = [word for word in words if word.lower() not in stop_words]
+        filtered_words = [
+            word for word in words if word.lower() not in stop_words]
         # Reconstruct the text
         return ' '.join(filtered_words)
-    except:
+    except Exception:
         return text
+
 
 def process_text_columns(df, text_columns):
     """Traite les colonnes de texte en supprimant les stopwords multilingues"""
     for col in text_columns:
-        df[col] = df[col].astype(str).apply(remove_nonsignificant_words_multilang)
+        df[col] = df[col].astype(str).apply(
+            remove_nonsignificant_words_multilang)
     return df
+
 
 def langues_detectees(df):
     """Affiche les langues détectées dans le dataset"""
@@ -84,8 +92,20 @@ def langues_detectees(df):
     for lang, count in language_counts.most_common():
         print(f"{lang}: {count} occurrences")
 
-df=convert_to_dict_filtered()
-langues_detectees(df)
+
+def clean_text_list(texts):
+    """
+    Takes a list of strings, cleans them using remove_nonsignificant_words_multilang,
+    and returns the cleaned list.
+    """
+    cleaned = []
+    for t in texts:
+        c = remove_nonsignificant_words_multilang(t)
+        if c and c.strip():
+            cleaned.append(c)
+    return cleaned
 
 
-
+if __name__ == '__main__':
+    df = convert_to_dict_filtered()
+    langues_detectees(df)

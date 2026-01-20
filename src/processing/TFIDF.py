@@ -1,73 +1,82 @@
-from collections import Counter
-import pandas as pd
-from typing import Dict
+from typing import Dict, List
 from sklearn.feature_extraction.text import TfidfVectorizer
-from .dataset_filtering import convert_to_dict_filtered, get_info_geo
 
-def cluster_to_texte(df: pd.DataFrame, cluster: list) -> str:
-    """
-        Concatène les tags des points du cluster en une chaine de caractères.
-    """
-    tags_list = []
-    for p in cluster:
-        # p est [latitude, longitude]
-        info = get_info_geo(df, p[0], p[1])
-        if info is not None and 'tags' in info and info['tags']:
-            # Convertir en string et vérifier que ce n'est pas NaN
-            tag = str(info['tags'])
-            if tag and tag.lower() != 'nan':
-                tags_list.append(tag)
-    
-    return ','.join(tags_list)
 
-def calculer_pourcentage_mots(texte: str) -> Dict[str, float]:
+def get_top_keywords(texts: List[str], top_n: int = 10,
+                     stop_words: str = 'english') -> List[tuple[str, float]]:
     """
-        Calcule le pourcentage d'apparition de chaque mot dans un texte donné.
+    Extracts top keywords from a list of texts using TF-IDF logic.
+    Since we only have one cluster's text here, it behaves like Term Frequency
+    but with stopword removal and tokenization power of TfidfVectorizer.
     """
-    if not texte or not texte.strip():
-        return {}
-
-    mots = texte.lower().split(',')
-    compteur = Counter(mots)
-    total_mots = len(mots)
-    
-    pourcentages = {
-        mot: (count / total_mots) * 100 
-        for mot, count in compteur.items()
-    }
-    
-    return pourcentages
-
-def tdidf_mots_clusters(df: pd.DataFrame, clusters: list) -> list:
-    """
-        Calcule le TF-IDF des mots de chaque cluster par rapport à tous les autres clusters.
-    """
-    # Convertir tous les clusters en textes
-    textes_clusters = []
-    for cluster in clusters:
-        texte = cluster_to_texte(df, cluster)
-        textes_clusters.append(texte if texte else "")
-    
-    # Vérifier que le cluster cible n'est pas vide
-    if not any(textes_clusters) or all(not texte.strip() for texte in textes_clusters):
+    if not texts:
         return []
-    
-    # Calculer TF-IDF sur tous les clusters
-    vectorizer = TfidfVectorizer(token_pattern=r'[^,]+', lowercase=True)
-    tfidf_matrix = vectorizer.fit_transform(textes_clusters)
-    
-    # Récupérer les noms des features (mots)
-    feature_names = vectorizer.get_feature_names_out()
-    
-    # Extraire les scores TF-IDF pour chaque cluster
-    tfidf_scores_clusters = []
-    for cluster_index in range(len(textes_clusters)):
-        tfidf_scores = {
-            feature_names[i].strip(): tfidf_matrix[cluster_index, i]
-            for i in range(len(feature_names))
-            if tfidf_matrix[cluster_index, i] > 0  # Ne garder que les mots présents dans ce cluster
-        }
-        tfidf_scores_clusters.append(tfidf_scores)
-    
-    return tfidf_scores_clusters
 
+    try:
+        # Combine all texts into one document to find most frequent words in
+        # this cluster
+        combined_text = " ".join(texts)
+        if not combined_text.strip():
+            return []
+
+        # We interpret 'texts' as a collection ensuring we can filter stopwords
+        # If we pass a list of 1 element, idf is constant.
+        vectorizer = TfidfVectorizer(stop_words=stop_words, max_features=top_n)
+        matrix = vectorizer.fit_transform([combined_text])
+
+        feature_names = vectorizer.get_feature_names_out()
+        scores = matrix.toarray()[0]
+
+        # Sort by score
+        indices = scores.argsort()[::-1]
+        top_keywords = [(feature_names[i], float(scores[i]))
+                        for i in indices[:top_n]]
+
+        return top_keywords
+    except Exception as e:
+        print(f"Error extracting keywords: {e}")
+        return []
+
+
+def tdidf_mots_clusters(cluster_texts: List[str]) -> List[Dict[str, float]]:
+    """
+    Calcule le TF-IDF des mots de chaque cluster par rapport à tous les autres clusters.
+    Input: List of strings (one string per cluster, containing all its text)
+    """
+    if not cluster_texts or all(not t.strip() for t in cluster_texts):
+        return []
+
+    try:
+        # Calculer TF-IDF sur tous les clusters
+        # Use 'english' as a safe default or make it configurable
+        vectorizer = TfidfVectorizer(
+            token_pattern=r'(?u)\b\w\w+\b',
+            lowercase=True,
+            stop_words='english')
+        tfidf_matrix = vectorizer.fit_transform(cluster_texts)
+
+        # Récupérer les noms des features (mots)
+        feature_names = vectorizer.get_feature_names_out()
+
+        # Extraire les scores TF-IDF pour chaque cluster
+        tfidf_scores_clusters = []
+        for cluster_index in range(len(cluster_texts)):
+            tfidf_scores = {
+                feature_names[i].strip(): float(tfidf_matrix[cluster_index, i])
+                for i in range(len(feature_names))
+                # Ne garder que les mots importants (> 0.05 par exemple)
+                if tfidf_matrix[cluster_index, i] > 0.05
+            }
+            # Sort dict by value descending
+            sorted_scores = dict(
+                sorted(
+                    tfidf_scores.items(),
+                    key=lambda item: item[1],
+                    reverse=True)[
+                    :10])
+            tfidf_scores_clusters.append(sorted_scores)
+
+        return tfidf_scores_clusters
+    except Exception as e:
+        print(f"TFIDF Error: {e}")
+        return []

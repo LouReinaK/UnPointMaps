@@ -1,33 +1,38 @@
-from fastapi.responses import HTMLResponse
-import pandas as pd
-import numpy as np
 import threading
 import asyncio
 import json
 import logging
 import queue
 import time
-from typing import List, Dict, Optional, Set
+import urllib.parse
+from typing import List, Dict, Optional, Set, Any
 from contextlib import asynccontextmanager
-
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
-from fastapi.staticfiles import StaticFiles
-from fastapi.middleware.cors import CORSMiddleware
-import uvicorn
 import hashlib
 import requests
 import re
 
+import pandas as pd
+import numpy as np
+from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
+import uvicorn
+
 # Project imports
+from src.processing.embedding_service import EmbeddingService
 from src.processing.dataset_filtering import convert_to_dict_filtered
 from src.processing.time_filtering import TimeFilter
-from src.clustering.hdbscan_clustering import hdbscan_clustering_iterative, hdbscan_iterative_generator
+from src.clustering.hdbscan_clustering import hdbscan_iterative_generator
 from src.clustering.clustering import kmeans_clustering
 from src.clustering.dbscan_clustering import dbscan_clustering
-from src.clustering.parallel_hdbscan_clustering import parallel_hdbscan_clustering_iterative, parallel_hdbscan_iterative_generator
-from src.processing.llm_labelling import ConfigManager, LLMLabelingService, ClusterMetadata
+from src.clustering.parallel_hdbscan_clustering import parallel_hdbscan_iterative_generator
+from src.processing.llm_labelling import ConfigManager, LLMLabelingService
+from src.processing.remove_nonsignificative_words import clean_text_list
+from src.processing.TFIDF import get_top_keywords
 from src.utils.hull_logic import compute_cluster_hulls
 from src.database.manager import DatabaseManager
+
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -39,13 +44,15 @@ class AppState:
         self.df: Optional[pd.DataFrame] = None
         self.time_filter: Optional[TimeFilter] = None # Lazy init
         self.events = []
-        self.current_clusters: Dict[int, Dict] = {} # cluster_id -> {points, metadata, status, label}
+        self.current_clusters: Dict[Any, Dict] = {} # cluster_id -> {points, metadata, status, label}
         self.active_websockets: List[WebSocket] = []
-        self.labelling_queue = queue.PriorityQueue()
+        self.labelling_queue: queue.PriorityQueue = queue.PriorityQueue()
         self.labelled_cluster_ids: Set[int] = set()
         self.stop_labelling_flag = threading.Event()
-        self.labelling_thread = None
-        self.db_manager = None 
+        self.labelling_thread: Optional[threading.Thread] = None
+        self.db_manager: Optional[DatabaseManager] = None 
+        self.embedding_service: Optional[EmbeddingService] = None
+        self.labelling_method: str = "llm" # "llm" or "statistical"
 
 app_state = AppState()
 
@@ -80,17 +87,107 @@ def labelling_worker():
                 
             logger.info(f"Processing label for {cluster_id} (Priority {priority})")
             
-            # Broadcast start
-            asyncio.run_coroutine_threadsafe(
-                broadcast_progress(f"Labelling cluster {cluster_id}..."),
-                loop
-            )
+            # Compute metadata if not already done
+            if not cluster_data.get('text_metadata'):
+                cluster_indices = cluster_data['cluster_indices']
+                cluster_df = app_state.df.loc[cluster_indices]
+                
+                # Prepare Metadata from Representative Sample (Closest to Centroid)
+                sample_ids = []
+                representative_df = pd.DataFrame()
+
+                # Try Semantic Selection
+                if app_state.embedding_service and app_state.embedding_service.get_embedding_model():
+                    try:
+                        temp_data = []
+                        
+                        text_cols = ['title', 'tags', 'description']
+                        available_cols = [col for col in text_cols if col in cluster_df.columns]
+                        
+                        if available_cols:
+                            filled_df = cluster_df[available_cols].fillna('')
+                            
+                            combined_series = None
+                            for col in available_cols:
+                                if combined_series is None:
+                                    combined_series = filled_df[col].astype(str)
+                                else:
+                                    combined_series = combined_series + " " + filled_df[col].astype(str)
+                            
+                            if combined_series is not None:
+                                temp_data = combined_series.tolist()
+                        if temp_data:
+                            top_local_indices = app_state.embedding_service.select_representative_indices(temp_data, top_k=50)
+                            
+                            representative_df = cluster_df.iloc[top_local_indices]
+                            sample_ids = representative_df.index.tolist()
+                    except Exception as e:
+                        logger.error(f"Semantic selection failed for cluster {cluster_id}: {e}")
+                        sample_ids = []
+                
+                # Fallback: Spatial Centroid
+                if not sample_ids:
+                    try:
+                        lats = np.array(cluster_df['latitude'].values.astype(float)).astype(np.float64)
+                        lons = np.array(cluster_df['longitude'].values.astype(float)).astype(np.float64)
+                        centroid_lat: float = np.mean(lats)
+                        centroid_lon: float = np.mean(lons)
+                        dists = (lats - centroid_lat)**2 + (lons - centroid_lon)**2
+                        sorted_indices = np.argsort(dists)
+                        n_sample = min(50, len(cluster_df))
+                        top_indices = sorted_indices[:n_sample]
+                        representative_df = cluster_df.iloc[top_indices]
+                        sample_ids = representative_df.index.tolist()
+                    except Exception as e:
+                        logger.error(f"Spatial fallback failed for cluster {cluster_id}: {e}")
+                        representative_df = cluster_df.head(50)
+                        sample_ids = representative_df.index.tolist()
+
+                # Extract Text
+                texts = []
+                for col in ['title', 'tags', 'description']:
+                    if col in representative_df.columns:
+                        texts.extend(representative_df[col].dropna().astype(str).tolist())
+                
+                cleaned_texts = clean_text_list(texts)
+                valid_texts = [t for t in cleaned_texts if len(t) > 3]
+                text_sample = valid_texts[:50]
+
+                # Extract Keywords
+                keywords = get_top_keywords(cleaned_texts, top_n=5)
+                keyword_list = [k[0] for k in keywords]
+                
+                provisional_label = ", ".join(keyword_list[:3]) if keyword_list else "Processing..."
+
+                # Image URLs
+                image_urls = []
+                for i, sample_id in enumerate(sample_ids):
+                    text = f"Cluster+{cluster_id}+Image+{i+1}"
+                    image_url = f"https://via.placeholder.com/400x300?text={text}"
+                    image_urls.append(image_url)
+                
+                # Update cluster_data
+                cluster_data['text_metadata'] = text_sample
+                cluster_data['keywords'] = keyword_list
+                cluster_data['sample_ids'] = sample_ids
+                cluster_data['image_urls'] = image_urls
+                cluster_data['label'] = provisional_label
+                
+                # Broadcast provisional label
+                if loop is not None:
+                    asyncio.run_coroutine_threadsafe(
+                        broadcast_label(cluster_id, provisional_label),
+                        loop
+                    )
+            
+            # Broadcast start of labelling
+            if loop is not None:
+                asyncio.run_coroutine_threadsafe(
+                    broadcast_progress(f"Labelling cluster {cluster_id}..."),
+                    loop
+                )
             
             # Prepare metadata for LLM
-            # We need to extract text metadata from the dataframe for this cluster
-            # The cluster_data should store indices or we filter df again (slower)
-            # Better: cluster_data stores text_metadata ready to go.
-            
             metadata_dict = {
                 "cluster_id": str(cluster_id),
                 "image_ids": [str(x) for x in cluster_data['sample_ids']],
@@ -98,37 +195,75 @@ def labelling_worker():
                 "cluster_size": cluster_data['size']
             }
             
-            # Compute Hash for Cache
-            # We explicitly exclude cluster_id from hash to allow cache hits across different runs 
-            # where the same cluster content might get a different ID
-            hash_input = {
-                "image_ids": metadata_dict["image_ids"],
-                "text_metadata": metadata_dict["text_metadata"]
-            }
-            cache_key = hashlib.sha256(json.dumps(hash_input, sort_keys=True).encode()).hexdigest()
-            
-            label = None
-            cached_data = None
-            
-            if app_state.db_manager:
-                cached_data = app_state.db_manager.get_cached_llm_label(cache_key)
-            
-            if cached_data and "label" in cached_data:
-                label = cached_data["label"]
-                logger.info(f"Using cached label for cluster {cluster_id}")
-            else:
-                try:
-                    # Call LLM
-                    result = labeling_service.generate_cluster_label(metadata_dict)
-                    label = result.label
-                    
-                    # Cache the result
-                    if app_state.db_manager:
-                        app_state.db_manager.save_cached_llm_label(cache_key, {"label": label})
+            # Determine Method
+            if app_state.labelling_method == "statistical":
+                # Statistical approach: Use top keywords
+                if loop is not None:
+                    asyncio.run_coroutine_threadsafe(
+                        broadcast_progress(f"Generating statistical label for cluster {cluster_id}..."),
+                        loop
+                    )
+                keywords = cluster_data.get('keywords', [])
+                if keywords:
+                    label = ", ".join(keywords[:3]) # Top 3 keywords
+                else:
+                    label = "Unlabeled Cluster"
+                logger.info(f"Statistical label for cluster {cluster_id}: {label}")
+                
+            else: 
+                # LLM approach (Default)
+                
+                # Compute Hash for Cache
+                # We explicitly exclude cluster_id from hash to allow cache hits across different runs 
+                # where the same cluster content might get a different ID
+                hash_input = {
+                    "image_ids": metadata_dict["image_ids"],
+                    "text_metadata": metadata_dict["text_metadata"]
+                }
+                cache_key = hashlib.sha256(json.dumps(hash_input, sort_keys=True).encode()).hexdigest()
+                
+                label = None
+                cached_data = None
+                
+                if app_state.db_manager:
+                    cached_data = app_state.db_manager.get_cached_llm_label(cache_key)
+                
+                if cached_data and "label" in cached_data:
+                    label = cached_data["label"]
+                    logger.info(f"Using cached label for cluster {cluster_id}")
+                    if loop is not None:
+                        asyncio.run_coroutine_threadsafe(
+                            broadcast_progress(f"Using cached label for cluster {cluster_id}"),
+                            loop
+                        )
+                else:
+                    try:
+                        if loop is not None:
+                            asyncio.run_coroutine_threadsafe(
+                                broadcast_progress(f"Preparing LLM prompt for cluster {cluster_id}..."),
+                                loop
+                            )
+                        # Call LLM
+                        result = labeling_service.generate_cluster_label(metadata_dict)
+                        label = result.label
                         
-                except Exception as e:
-                    logger.error(f"Error labelling {cluster_id}: {e}")
-                    # Retry logic if needed?
+                        if loop is not None:
+                            asyncio.run_coroutine_threadsafe(
+                                broadcast_progress(f"LLM generated label for cluster {cluster_id}"),
+                                loop
+                            )
+                        
+                        # Cache the result
+                        if app_state.db_manager:
+                            app_state.db_manager.save_cached_llm_label(cache_key, {"label": label})
+                            
+                    except Exception as e:
+                        logger.error(f"Error labelling {cluster_id}: {e}")
+                        if loop is not None:
+                            asyncio.run_coroutine_threadsafe(
+                                broadcast_progress(f"Failed to label cluster {cluster_id}: {str(e)}"),
+                                loop
+                            )
             
             if label:
                 # Update State
@@ -136,10 +271,11 @@ def labelling_worker():
                 app_state.labelled_cluster_ids.add(cluster_id)
                 
                 # Broadcast
-                asyncio.run_coroutine_threadsafe(
-                    broadcast_label(cluster_id, label),
-                    loop
-                )
+                if loop is not None:
+                    asyncio.run_coroutine_threadsafe(
+                        broadcast_label(cluster_id, label),
+                        loop
+                    )
             
             app_state.labelling_queue.task_done()
             
@@ -165,7 +301,7 @@ async def broadcast_label(cluster_id: str, label: str):
             app_state.active_websockets.remove(ws)
 
 async def broadcast_progress(message_text: str, iteration: Optional[int] = None):
-    msg_data = {
+    msg_data: Dict[str, Any] = {
         "type": "progress",
         "message": message_text
     }
@@ -184,7 +320,7 @@ async def broadcast_progress(message_text: str, iteration: Optional[int] = None)
             app_state.active_websockets.remove(ws)
 
 # Start Labelling Thread
-loop = None
+loop: Optional[asyncio.AbstractEventLoop] = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -196,6 +332,10 @@ async def lifespan(app: FastAPI):
     
     # Init DB Manager
     app_state.db_manager = DatabaseManager()
+
+    # Init Embedding Service
+    app_state.embedding_service = EmbeddingService.get_instance()
+    app_state.embedding_service.load_model()
 
     # Load Data
     logger.info("Loading dataset...")
@@ -272,7 +412,7 @@ async def broadcast_clusters(clusters_data: List[Dict]):
         if ws in app_state.active_websockets:
             app_state.active_websockets.remove(ws)
 
-def update_app_state_with_clustering_results(df: pd.DataFrame, labels: np.ndarray):
+def update_app_state_with_clustering_results(df: pd.DataFrame, labels: np.ndarray, enqueue: bool = True):
     """
     Helper to process clustering results immediately.
     Updates AppState and returns the list of clusters for the frontend.
@@ -284,14 +424,14 @@ def update_app_state_with_clustering_results(df: pd.DataFrame, labels: np.ndarra
         try:
             app_state.labelling_queue.get_nowait()
             app_state.labelling_queue.task_done()
-        except:
+        except Exception:
             pass
     
     app_state.labelled_cluster_ids.clear()
     app_state.current_clusters.clear()
     
     result_clusters = []
-    unique_labels = sorted([l for l in np.unique(labels) if l != -1])
+    unique_labels = sorted([label for label in np.unique(labels) if label != -1])
     
     for cluster_id_np in unique_labels:
         cluster_id = int(cluster_id_np)
@@ -300,72 +440,82 @@ def update_app_state_with_clustering_results(df: pd.DataFrame, labels: np.ndarra
         
         # Compute Hull
         try:
-             hull_points_list = compute_cluster_hulls([points], alpha=None)[0]
-             hull_points = hull_points_list
+            hull_points_list = compute_cluster_hulls([points], alpha=None)[0]
+            hull_points = hull_points_list
         except Exception as e:
-             logger.error(f"Hull error for {cluster_id}: {e}")
-             hull_points = points
+            logger.error(f"Hull error for {cluster_id}: {e}")
+            hull_points = points
 
-        # Prepare Metadata
-        texts = []
-        for col in ['title', 'tags', 'description']:
-            if col in cluster_df.columns:
-                texts.extend(cluster_df[col].dropna().astype(str).tolist())
-        
-        valid_texts = [t for t in texts if len(t) > 3]
-        text_sample = valid_texts[:50]
-        
-        # Generate placeholder image URLs for the cluster
-        # In a real scenario, these would come from the dataset's image URL column
-        sample_ids = cluster_df.index[:20].tolist()
-        image_urls = []
-        for i, sample_id in enumerate(sample_ids):
-            text = f"Cluster+{cluster_id}+Image+{i+1}"
-            image_url = f"https://via.placeholder.com/400x300?text={text}"
-            image_urls.append(image_url)
+        # Store basic info; metadata will be computed in labelling worker
+        cluster_indices = cluster_df.index.tolist()
         
         app_state.current_clusters[cluster_id] = {
             "size": len(cluster_df),
             "points": hull_points, 
-            "text_metadata": text_sample,
-            "sample_ids": sample_ids,
-            "image_urls": image_urls,
-            "label": None
+            "text_metadata": [],  # placeholder
+            "keywords": [],  # placeholder
+            "sample_ids": [],  # placeholder
+            "image_urls": [],  # placeholder
+            "cluster_indices": cluster_indices,  # for metadata computation
+            "label": "Processing..."
         }
         
-        app_state.labelling_queue.put((10, cluster_id, 0)) 
+        if enqueue:
+            app_state.labelling_queue.put((10, cluster_id, 0)) 
         
         result_clusters.append({
             "id": cluster_id,
             "points": hull_points,
-            "size": len(cluster_df)
+            "size": len(cluster_df),
+            "label": "Processing..."
         })
 
     return result_clusters
 
-def background_clustering_task(df: pd.DataFrame, params: dict):
+def background_clustering_task(df: pd.DataFrame, params: dict, total_start: float, filter_time: float):
     logger.info("Starting background clustering task...")
     
+    if loop is not None:
+        asyncio.run_coroutine_threadsafe(
+            broadcast_progress("Initializing clustering algorithm..."),
+            loop
+        )
+    
     # Check cache
+    cache_check_start = time.time()
     try:
-        dataset_hash = hashlib.sha256(pd.util.hash_pandas_object(df, index=True).values).hexdigest()
+        dataset_hash = hashlib.sha256(np.array(pd.util.hash_pandas_object(df, index=True)).tobytes()).hexdigest()
         if app_state.db_manager:
             cached_labels = app_state.db_manager.get_cached_labels(params, dataset_hash)
             if cached_labels is not None:
-                logger.info("Found cached clustering results. Skipping computation.")
-                asyncio.run_coroutine_threadsafe(
-                    broadcast_progress(f"Clustering complete (Cached)."),
-                    loop
-                )
-                result_clusters = update_app_state_with_clustering_results(df, cached_labels)
-                asyncio.run_coroutine_threadsafe(
-                    broadcast_clusters(result_clusters),
-                    loop
-                )
+                cache_check_time = time.time() - cache_check_start
+                logger.info(f"Cache check took {cache_check_time:.4f}s - Found cached clustering results. Skipping computation.")
+                n_clusters = len(set(cached_labels)) - (1 if -1 in cached_labels else 0)  # Exclude noise
+                if loop is not None:
+                    asyncio.run_coroutine_threadsafe(
+                        broadcast_progress(f"Clustering complete (Cached). Found {n_clusters} clusters."),
+                        loop
+                    )
+                result_clusters = update_app_state_with_clustering_results(df, cached_labels, enqueue=False)
+                if loop is not None:
+                    asyncio.run_coroutine_threadsafe(
+                        broadcast_clusters(result_clusters),
+                        loop
+                    )
+                
+                # Now enqueue for labelling
+                for cluster in result_clusters:
+                    app_state.labelling_queue.put((10, cluster['id'], 0))
+
+                total_time = time.time() - total_start
+                logger.info(f"Total clustering time (cached): {total_time:.4f}s")
                 return
+
     except Exception as e:
         logger.error(f"Error checking cache: {e}")
         dataset_hash = "unknown" # Fallback if hashing fails, though unlikely
+    cache_check_time = time.time() - cache_check_start
+    logger.info(f"Cache check took {cache_check_time:.4f}s - No cache found, proceeding with computation.")
 
     min_cluster_size = 10
     cluster_selection_epsilon = 1/1000.0
@@ -389,8 +539,9 @@ def background_clustering_task(df: pd.DataFrame, params: dict):
         )
     
     # Run generator in a separate thread and use a queue to decouple processing
-    result_queue = queue.Queue()
-    iteration_times = []
+    result_queue: queue.Queue = queue.Queue()
+    iteration_times: List[Dict[str, Any]] = []
+    compute_start = time.time()
     
     def generator_thread():
         try:
@@ -438,10 +589,11 @@ def background_clustering_task(df: pd.DataFrame, params: dict):
             if iteration:
                 msg += f" [Iter {iteration}]"
 
-            asyncio.run_coroutine_threadsafe(
-                broadcast_progress(msg, iteration=iteration),
-                loop
-            )
+            if loop is not None:
+                asyncio.run_coroutine_threadsafe(
+                    broadcast_progress(msg, iteration=iteration),
+                    loop
+                )
             clusters_for_ws = []
             
             # Compute hulls for intermediate clusters (potentially parallelize this if slow)
@@ -454,10 +606,18 @@ def background_clustering_task(df: pd.DataFrame, params: dict):
             # Optimization: compute hulls in batches or parallel? 
             # For now, sequential.
             try:
+                # Extract points only for hull computation
+                # Each item in clusters_list is (points, indices)
+                try:
+                    points_only_list = [c[0] for c in clusters_list]
+                except Exception:
+                    # Fallback if structure is wrong (e.g. parallel hdbscan not updated yet)
+                    points_only_list = clusters_list
+
                 t0 = time.time()
                 # compute_cluster_hulls takes List[List[List[float]]] -> List[List[List[float]]] (hulls)
                 # It handles exceptions internally? No, returns list corresponding to inputs.
-                hulls_list = compute_cluster_hulls(clusters_list, alpha=None)
+                hulls_list = compute_cluster_hulls(points_only_list, alpha=None)
                 dt = time.time() - t0
                 
                 logger.info(f"Iteration {iteration if iteration else '?'} hull computation for {len(clusters_list)} clusters took {dt:.4f}s")
@@ -468,56 +628,115 @@ def background_clustering_task(df: pd.DataFrame, params: dict):
                 })
                 
                 for i, hull in enumerate(hulls_list):
-                   clusters_for_ws.append({
-                       "id": f"temp_{i}",
-                       "points": hull,
-                       "size": len(clusters_list[i]), 
-                       "temp": True
-                   })
+                    cid = f"temp_{i}"
+                    
+                    # Store metadata for preview if available
+                    sample_ids = []
+                    if i < len(clusters_list) and isinstance(clusters_list[i], (tuple, list)) and len(clusters_list[i]) >= 2:
+                        indices = clusters_list[i][1]
+                        # Take sample for preview (e.g. first 20)
+                        sample_ids = indices[:20] 
+                        
+                        # Store in app_state so API can retrieve images
+                        app_state.current_clusters[cid] = {
+                             "size": len(indices),
+                             "points": hull,
+                             "text_metadata": [],
+                             "keywords": [],
+                             "sample_ids": sample_ids,
+                             "image_urls": [], 
+                             "label": "Clustering..."
+                        }
+
+                    clusters_for_ws.append({
+                        "id": cid,
+                        "points": hull,
+                        "size": len(clusters_list[i]), 
+                        "temp": True,
+                        "label": "Clustering..."
+                    })
                    
-                asyncio.run_coroutine_threadsafe(
-                    broadcast_clusters(clusters_for_ws),
-                    loop
-                )
+                if loop is not None:
+                    asyncio.run_coroutine_threadsafe(
+                        broadcast_clusters(clusters_for_ws),
+                        loop
+                    )
             except Exception as e:
                 logger.error(f"Error computing intermediate hulls: {e}")
                 
         elif status == "final":
-             final_clusters_data, n_clusters, final_labels = data
-             logger.info(f"Background clustering complete: {n_clusters} clusters.")
-             
-             # Save to cache
-             if app_state.db_manager:
-                 try:
-                     app_state.db_manager.save_cached_labels(params, dataset_hash, final_labels)
-                 except Exception as e:
-                     logger.error(f"Error saving to cache: {e}")
+            final_clusters_data, n_clusters, final_labels = data
+            logger.info(f"Background clustering complete: {n_clusters} clusters.")
+            
+            # Save to cache
+            if app_state.db_manager:
+                try:
+                    app_state.db_manager.save_cached_labels(params, dataset_hash, final_labels)
+                except Exception as e:
+                    logger.error(f"Error saving to cache: {e}")
 
-             # Log summary report and iteration details
-             logger.info("=== Hull Computation Performance Report ===")
-             for rec in iteration_times:
-                 logger.info(f"  Iter {rec['iteration']}: {rec['count']} clusters -> {rec['time']:.4f}s")
-             if iteration_times:
-                 avg_time = sum(r['time'] for r in iteration_times) / len(iteration_times)
-                 logger.info(f"  Average Time: {avg_time:.4f}s per iteration")
-             logger.info("=========================================")
+            # Log summary report and iteration details
+            logger.info("=== Hull Computation Performance Report ===")
+            for rec in iteration_times:
+                logger.info(f"  Iter {rec['iteration']}: {rec['count']} clusters -> {rec['time']:.4f}s")
+            if iteration_times:
+                avg_time = sum(r['time'] for r in iteration_times) / len(iteration_times)
+                logger.info(f"  Average Time: {avg_time:.4f}s per iteration")
+            logger.info("=========================================")
 
-             asyncio.run_coroutine_threadsafe(
-                broadcast_progress(f"Clustering complete. Found {n_clusters} clusters."),
-                loop
-             )
-             
-             # Update state fully
-             result_clusters = update_app_state_with_clustering_results(df, final_labels)
-             
-             # Broadcast Final Result
-             asyncio.run_coroutine_threadsafe(
-                broadcast_clusters(result_clusters),
-                loop
-             )
-             break
+            if loop is not None:
+                asyncio.run_coroutine_threadsafe(
+                    broadcast_progress(f"Clustering complete. Found {n_clusters} clusters."),
+                    loop
+                )
+            
+            # Update state fully
+            result_clusters = update_app_state_with_clustering_results(df, final_labels, enqueue=False)
+            
+            # Broadcast Final Result
+            if loop is not None:
+                asyncio.run_coroutine_threadsafe(
+                    broadcast_clusters(result_clusters),
+                    loop
+                )
+            
+            # Now enqueue for labelling
+            for cluster in result_clusters:
+                app_state.labelling_queue.put((10, cluster['id'], 0))
+                
+            break
 
     t.join()
+    compute_time = time.time() - compute_start
+    logger.info(f"Clustering computation took {compute_time:.4f}s")
+    total_time = time.time() - total_start
+    logger.info(f"Total clustering time: {total_time:.4f}s")
+    
+    # Sort tasks by time (descending)
+    task_times = [
+        ("Data filtering", filter_time),
+        ("Cache check", cache_check_time),
+        ("Clustering computation", compute_time),
+        ("State update", 0),  # Not measured in background
+    ]
+    task_times.sort(key=lambda x: x[1], reverse=True)
+    logger.info("Tasks sorted by time (descending):")
+    for task, t in task_times:
+        if t > 0:
+            logger.info(f"  {task}: {t:.4f}s")
+    
+    # Sort tasks by time (descending)
+    task_times = [
+        ("Data filtering", filter_time),
+        ("Cache check", cache_check_time),
+        ("Clustering computation", compute_time if 'compute_time' in locals() else 0),
+        ("State update", 0),  # Not measured in background
+    ]
+    task_times.sort(key=lambda x: x[1], reverse=True)
+    logger.info("Tasks sorted by time (descending):")
+    for task, t in task_times:
+        if t > 0:
+            logger.info(f"  {task}: {t:.4f}s")
 
 @app.post("/api/cluster")
 async def run_clustering(params: dict):
@@ -526,22 +745,39 @@ async def run_clustering(params: dict):
     {
         "min_year": 2010,
         "max_year": 2015,
+        "start_date": "2010-01-01",
+        "end_date": "2015-12-31",
         "start_hour": 8,
         "end_hour": 18,
         "exclude_events": [1, 2] # indices of events to exclude
     }
     """
     logger.info(f"Clustering request: {params}")
+    total_start = time.time()
+
+    # Set Labelling Method
+    if "labelling_method" in params:
+        app_state.labelling_method = params["labelling_method"]
+        logger.info(f"Labelling method set to: {app_state.labelling_method}")
     
     # Filter Data
+    if app_state.df is None:
+        return {"clusters": [], "count": 0, "error": "Data not loaded"}
     df = app_state.df.copy()
     
+    filter_start = time.time()
     # Year Filter
     if "min_year" in params and "max_year" in params:
         df = df[
             (df['date'].dt.year >= params['min_year']) & 
             (df['date'].dt.year <= params['max_year'])
         ]
+        
+    # Date Filter
+    if "start_date" in params and "end_date" in params:
+        start_date = pd.to_datetime(params['start_date'])
+        end_date = pd.to_datetime(params['end_date'])
+        df = df[(df['date'] >= start_date) & (df['date'] <= end_date)]
         
     # Time of Day Filter
     if "start_hour" in params and "end_hour" in params:
@@ -557,10 +793,24 @@ async def run_clustering(params: dict):
         for idx in params['exclude_events']:
             if 0 <= idx-1 < len(app_state.events):
                 events_to_exclude.append(app_state.events[idx-1])
-        if events_to_exclude:
+        if events_to_exclude and app_state.time_filter is not None:
             df = app_state.time_filter.exclude_events(df, events_to_exclude)
-            
+
+    # Include Events (Mutual Exclusion usually, or sequential filter?)
+    if "include_events" in params and params['include_events']:
+        events_to_include = []
+        for idx in params['include_events']:
+            if 0 <= idx-1 < len(app_state.events):
+                events_to_include.append(app_state.events[idx-1])
+        if events_to_include and app_state.time_filter is not None:
+            df = app_state.time_filter.filter_by_events(df, events_to_include, exclude=False)
+
+    filter_time = time.time() - filter_start
+    logger.info(f"Data filtering took {filter_time:.4f}s, resulting in {len(df)} points")
+
     if len(df) == 0:
+        total_time = time.time() - total_start
+        logger.info(f"Total clustering time: {total_time:.4f}s (no data)")
         return {"clusters": [], "count": 0}
         
     # Get Algorithm
@@ -568,7 +818,7 @@ async def run_clustering(params: dict):
     
     # If using parallel hdbscan or normal hdbscan, running in background to support iterative updates
     if algo == "parallel_hdbscan" or algo == "hdbscan":
-        threading.Thread(target=background_clustering_task, args=(df, params)).start()
+        threading.Thread(target=background_clustering_task, args=(df, params, total_start, filter_time)).start()
         return {"clusters": [], "count": 0, "status": "started"}
 
     # Standard Blocking Execution (for other algorithms like kmeans, dbscan)
@@ -577,6 +827,7 @@ async def run_clustering(params: dict):
     max_cluster_size = 1000
     
     try:
+        compute_start = time.time()
         if algo == "kmeans":
             clustered_points_groups, used_k, labels = kmeans_clustering(df)
             
@@ -586,20 +837,34 @@ async def run_clustering(params: dict):
         else:
             raise HTTPException(status_code=400, detail=f"Unknown algorithm: {algo}")
             
+        compute_time = time.time() - compute_start
+        logger.info(f"Clustering computation ({algo}) took {compute_time:.4f}s")
+        
         # Update State & Return
+        update_start = time.time()
         result_clusters = update_app_state_with_clustering_results(df, labels)
+        update_time = time.time() - update_start
+        logger.info(f"State update took {update_time:.4f}s")
+        
+        total_time = time.time() - total_start
+        logger.info(f"Total clustering time: {total_time:.4f}s")
         return {"clusters": result_clusters, "count": len(result_clusters)}
 
     except Exception as e:
         logger.error(f"Clustering error ({algo}): {e}")
+        total_time = time.time() - total_start
+        logger.info(f"Total clustering time (with error): {total_time:.4f}s")
         return {"clusters": [], "count": 0, "error": str(e)}
 
 def get_flickr_image_url(user_id, photo_id):
     try:
         photo_url = f"https://www.flickr.com/photos/{user_id}/{photo_id}/"
-        oembed_url = f"https://www.flickr.com/services/oembed/?url={requests.utils.quote(photo_url)}&format=json"
+        oembed_url = f"https://www.flickr.com/services/oembed/?url={urllib.parse.quote(photo_url)}&format=json"
         # Use a short timeout to avoid hanging
-        resp = requests.get(oembed_url, timeout=3)
+        headers = {
+            'User-Agent': 'UnPointMaps/1.0 (https://github.com/LouReinaK/UnPointMaps)'
+        }
+        resp = requests.get(oembed_url, headers=headers, timeout=3)
         if resp.status_code == 200:
             data = resp.json()
             html = data.get("html", "")
@@ -617,15 +882,17 @@ async def get_cluster_images(cluster_id: str):
     Return image URLs for a specific cluster.
     Resolves real Flickr URLs using oEmbed.
     """
-    # Handle temporary clusters or non-integer IDs
-    try:
-        c_id = int(cluster_id)
-    except ValueError:
-        return {"images": [], "error": "Cannot fetch images for temporary or invalid cluster ID"}
+    # Determine ID type (int or str for 'temp_')
+    c_id: Any = cluster_id
+    if not str(cluster_id).startswith("temp_"):
+        try:
+            c_id = int(cluster_id)
+        except ValueError:
+            pass # keep as string if fails, though usually expect int for final clusters
 
     cluster_data = app_state.current_clusters.get(c_id)
     if cluster_data is None:
-        return {"images": [], "error": "Cluster not found"}
+        return {"images": [], "error": f"Cluster {c_id} not found"}
     
     sample_ids = cluster_data.get("sample_ids", [])
     
@@ -635,7 +902,7 @@ async def get_cluster_images(cluster_id: str):
     async def fetch_url(idx):
         try:
             # Safely get row from app_state.df
-            if idx not in app_state.df.index:
+            if app_state.df is None or idx not in app_state.df.index:
                 return None
             
             row = app_state.df.loc[idx]
@@ -662,10 +929,10 @@ async def get_cluster_images(cluster_id: str):
     
     # Fallback if no real images found
     if not image_data:
-         image_data.append({
-             "url": f"https://placehold.co/400x300?text=Cluster+{cluster_id}",
-             "page_url": None
-         })
+        image_data.append({
+            "url": f"https://placehold.co/400x300?text=Cluster+{cluster_id}",
+            "page_url": None
+        })
     
     return {"images": image_data, "cluster_id": cluster_id}
 

@@ -1,6 +1,5 @@
 import folium
 import pandas as pd
-import numpy as np
 
 # Trinome 3
 
@@ -38,13 +37,15 @@ class Visualisation:
                 latitude, longitude = point
                 name = "Unknown"
             except (ValueError, TypeError):
-                 # Fallback if it's an object with attributes (like the old Point, or similar)
-                 if hasattr(point, 'latitude') and hasattr(point, 'longitude'):
-                     latitude = point.latitude
-                     longitude = point.longitude
-                     name = getattr(point, 'title', getattr(point, 'name', 'Unknown'))
-                 else:
-                     raise TypeError(f"Cannot interpret point: {point}")
+                # Fallback if it's an object with attributes (like the old
+                # Point, or similar)
+                if hasattr(point, 'latitude') and hasattr(point, 'longitude'):
+                    latitude = point.latitude
+                    longitude = point.longitude
+                    name = getattr(point, 'title', getattr(
+                        point, 'name', 'Unknown'))
+                else:
+                    raise TypeError(f"Cannot interpret point: {point}")
 
         kwargs = kwargs | {"popup": name, "tooltip": f"Tooltip: {name}"}
 
@@ -61,7 +62,8 @@ class Visualisation:
             try:
                 min_lat, min_lon = bounds[0]
                 max_lat, max_lon = bounds[1]
-                center_point = [(min_lat + max_lat) / 2, (min_lon + max_lon) / 2]
+                center_point = [(min_lat + max_lat) / 2,
+                                (min_lon + max_lon) / 2]
             except Exception:
                 # Malformed bounds: fall back to defaults
                 bounds = None

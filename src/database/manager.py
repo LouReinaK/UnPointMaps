@@ -4,7 +4,7 @@ import hashlib
 import numpy as np
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple, Any
-import os
+
 
 class DatabaseManager:
     def __init__(self, db_path: str = "unpointmaps_cache.db"):
@@ -39,8 +39,9 @@ class DatabaseManager:
         ''')
 
         # Table to store points for each cluster (to avoid re-reading/matching large DF if desired)
-        # Using a simplistic approach: storing lat/lon directly. 
-        # For large datasets, referencing original indices might be better, but we cache computed data as requested.
+        # Using a simplistic approach: storing lat/lon directly.
+        # For large datasets, referencing original indices might be better, but
+        # we cache computed data as requested.
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS cluster_points (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -61,7 +62,7 @@ class DatabaseManager:
                 dataset_signature TEXT
             )
         ''')
-        
+
         # Table to store detected events
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS detected_events (
@@ -97,6 +98,15 @@ class DatabaseManager:
             )
         ''')
 
+        # Table for embeddings cache
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS embeddings_cache (
+                text_hash TEXT PRIMARY KEY,
+                embedding_blob BLOB,
+                created_at TEXT
+            )
+        ''')
+
         # Table for generic clustering results (labels array)
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS clustering_results (
@@ -115,13 +125,14 @@ class DatabaseManager:
         """Retrieve cached hull geometry."""
         try:
             conn = sqlite3.connect(self.db_path)
-            cursor = conn.execute("SELECT hull_data FROM hull_cache WHERE cache_key = ?", (key,))
+            cursor = conn.execute(
+                "SELECT hull_data FROM hull_cache WHERE cache_key = ?", (key,))
             row = cursor.fetchone()
             conn.close()
             if row:
                 return json.loads(row[0])
         except Exception as e:
-            pass # Fail silently on cache read error
+            pass  # Fail silently on cache read error
         return None
 
     def save_cached_hull(self, key: str, hull_data: List[List[List[float]]]):
@@ -129,25 +140,26 @@ class DatabaseManager:
         try:
             serialized = json.dumps(hull_data)
             timestamp = datetime.now().isoformat()
-            
+
             conn = sqlite3.connect(self.db_path)
             conn.execute(
-                "INSERT OR REPLACE INTO hull_cache (cache_key, hull_data, created_at) VALUES (?, ?, ?)", 
+                "INSERT OR REPLACE INTO hull_cache (cache_key, hull_data, created_at) VALUES (?, ?, ?)",
                 (key, serialized, timestamp)
             )
             conn.commit()
             conn.close()
         except Exception as e:
-            pass # Fail silently on cache write error
+            pass  # Fail silently on cache write error
 
     def get_cached_llm_label(self, key: str) -> Optional[Dict[str, Any]]:
         """Retrieve cached LLM label result."""
         try:
             conn = sqlite3.connect(self.db_path)
-            cursor = conn.execute("SELECT label_data FROM llm_cache WHERE cache_key = ?", (key,))
+            cursor = conn.execute(
+                "SELECT label_data FROM llm_cache WHERE cache_key = ?", (key,))
             row = cursor.fetchone()
             conn.close()
-            
+
             if row:
                 return json.loads(row[0])
             return None
@@ -167,33 +179,114 @@ class DatabaseManager:
         except Exception as e:
             pass
 
-    def _compute_params_hash(self, params: Dict[str, Any], dataset_signature: str) -> str:
+    def get_cached_embeddings(self, texts: List[str]) -> Dict[str, np.ndarray]:
+        """Retrieve cached embeddings for a list of texts."""
+        if not texts:
+            return {}
+
+        # Compute hashes
+        text_hashes = {
+            t: hashlib.sha256(
+                t.encode('utf-8')).hexdigest() for t in texts}
+        # We need to map hash back to potentially multiple texts if collisions (unlikely but possible logic)
+        # But here we just use the first match or assuming unique enough.
+        # Actually, let's just lookup by hash.
+        hashes_to_texts: Dict[str, List[str]] = {}
+        for t, h in text_hashes.items():
+            if h not in hashes_to_texts:
+                hashes_to_texts[h] = []
+            hashes_to_texts[h].append(t)
+
+        unique_hashes = list(text_hashes.values())
+
+        cached_embeddings = {}
+
+        try:
+            conn = sqlite3.connect(self.db_path)
+
+            # Chunking because SQLite has variable limit
+            chunk_size = 900
+            for i in range(0, len(unique_hashes), chunk_size):
+                chunk = unique_hashes[i:i + chunk_size]
+                placeholders = ',' .join(['?'] * len(chunk))
+                query = f"SELECT text_hash, embedding_blob FROM embeddings_cache WHERE text_hash IN ({placeholders})"
+
+                cursor = conn.execute(query, chunk)
+                for row in cursor:
+                    text_hash, blob = row
+                    # Assuming float32 as it is standard for
+                    # sentence-transformers
+                    embedding = np.frombuffer(blob, dtype=np.float32)
+
+                    # Populate for all texts matching this hash
+                    if text_hash in hashes_to_texts:
+                        for t in hashes_to_texts[text_hash]:
+                            cached_embeddings[t] = embedding
+
+            conn.close()
+        except Exception as e:
+            # Fail silently or log
+            pass
+
+        return cached_embeddings
+
+    def save_cached_embeddings(
+            self, text_embedding_map: Dict[str, np.ndarray]):
+        """Save embeddings to cache."""
+        if not text_embedding_map:
+            return
+
+        try:
+            # Increased timeout for concurrency
+            conn = sqlite3.connect(self.db_path, timeout=30.0)
+            created_at = datetime.now().isoformat()
+
+            data_to_insert = []
+            for text, embedding in text_embedding_map.items():
+                text_hash = hashlib.sha256(text.encode('utf-8')).hexdigest()
+                # Ensure float32
+                blob = embedding.astype(np.float32).tobytes()
+                data_to_insert.append((text_hash, blob, created_at))
+
+            # Use executemany for bulk insert
+            conn.executemany(
+                "INSERT OR REPLACE INTO embeddings_cache (text_hash, embedding_blob, created_at) VALUES (?, ?, ?)",
+                data_to_insert)
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            # print(f"DB Write Error: {e}")
+            pass
+
+    def _compute_params_hash(
+            self, params: Dict[str, Any], dataset_signature: str) -> str:
         """Compute a consistent hash for parameters and dataset."""
         # Sort keys to ensure consistent JSON
         params_str = json.dumps(params, sort_keys=True)
         combined = f"{params_str}|{dataset_signature}"
         return hashlib.sha256(combined.encode()).hexdigest()
 
-    def get_cached_run(self, params: Dict[str, Any], dataset_signature: str) -> Optional[int]:
+    def get_cached_run(
+            self, params: Dict[str, Any], dataset_signature: str) -> int | None:
         """Check if a run with these parameters already exists."""
         params_hash = self._compute_params_hash(params, dataset_signature)
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        
+
         cursor.execute(
-            "SELECT id FROM clustering_runs WHERE params_hash = ? ORDER BY id DESC LIMIT 1", 
+            "SELECT id FROM clustering_runs WHERE params_hash = ? ORDER BY id DESC LIMIT 1",
             (params_hash,)
         )
         row = cursor.fetchone()
         conn.close()
-        
+
         return row[0] if row else None
 
-    def save_run(self, params: Dict[str, Any], dataset_signature: str, 
+    def save_run(self, params: Dict[str, Any], dataset_signature: str,
                  clusters_data: List[Any], labels_map: Dict[int, str]) -> int:
         """
         Save a new clustering run and its results.
-        
+
         Args:
             params: Dictionary of clustering parameters.
             dataset_signature: Identifier for the dataset.
@@ -203,10 +296,10 @@ class DatabaseManager:
         """
         params_hash = self._compute_params_hash(params, dataset_signature)
         timestamp = datetime.now().isoformat()
-        
+
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        
+
         try:
             # 1. Insert Run
             cursor.execute(
@@ -214,32 +307,35 @@ class DatabaseManager:
                 (timestamp, params_hash, json.dumps(params), dataset_signature)
             )
             run_id = cursor.lastrowid
-            
+            if run_id is None:
+                raise RuntimeError("Failed to get run_id after insertion")
+
             # 2. Insert Clusters and Points
             for cluster_idx, points in enumerate(clusters_data):
                 # points expected to be list of [lat, lon]
-                label_text = labels_map.get(cluster_idx, f"Cluster {cluster_idx}")
-                
+                label_text = labels_map.get(
+                    cluster_idx, f"Cluster {cluster_idx}")
+
                 cursor.execute(
                     "INSERT INTO clusters (run_id, cluster_index, label) VALUES (?, ?, ?)",
                     (run_id, cluster_idx, label_text)
                 )
                 cluster_db_id = cursor.lastrowid
-                
+
                 # Batch insert points
                 # Assuming points is a list of [lat, lon] or similar
-                # We won't store original_index if not provided easily, defaulting to NULL
+                # We won't store original_index if not provided easily,
+                # defaulting to NULL
                 points_batch = []
                 for point in points:
                     # Point is likely [lat, lon]
                     lat, lon = point[0], point[1]
                     points_batch.append((cluster_db_id, lat, lon))
-                
+
                 if points_batch:
                     cursor.executemany(
                         "INSERT INTO cluster_points (cluster_id, latitude, longitude) VALUES (?, ?, ?)",
-                        points_batch
-                    )
+                        points_batch)
 
             conn.commit()
             return run_id
@@ -249,32 +345,37 @@ class DatabaseManager:
         finally:
             conn.close()
 
-    def load_run_data(self, run_id: int) -> Tuple[List[List[List[float]]], Dict[int, str]]:
+    def load_run_data(
+            self, run_id: int) -> Tuple[List[List[List[float]]], Dict[int, str]]:
         """
         Load clusters and labels for a given run ID.
         Returns (clustered_points, llm_labels)
         """
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        
+
         try:
             # Get clusters
-            cursor.execute("SELECT id, cluster_index, label FROM clusters WHERE run_id = ? ORDER BY cluster_index", (run_id,))
+            cursor.execute(
+                "SELECT id, cluster_index, label FROM clusters WHERE run_id = ? ORDER BY cluster_index",
+                (run_id,
+                 ))
             cluster_rows = cursor.fetchall()
-            
+
             clustered_points = []
             llm_labels = {}
-            
+
             for c_id, c_idx, label in cluster_rows:
                 llm_labels[c_idx] = label
-                
+
                 # Get points for this cluster
-                cursor.execute("SELECT latitude, longitude FROM cluster_points WHERE cluster_id = ?", (c_id,))
+                cursor.execute(
+                    "SELECT latitude, longitude FROM cluster_points WHERE cluster_id = ?", (c_id,))
                 points = [[row[0], row[1]] for row in cursor.fetchall()]
                 clustered_points.append(points)
-                
+
             return clustered_points, llm_labels
-            
+
         finally:
             conn.close()
 
@@ -282,7 +383,7 @@ class DatabaseManager:
         """Retrieve cached events for a dataset of a given size."""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        
+
         try:
             # Find the most recent run with matching dataset size
             cursor.execute(
@@ -292,17 +393,17 @@ class DatabaseManager:
             row = cursor.fetchone()
             if not row:
                 return None
-                
+
             run_id = row[0]
-            
+
             cursor.execute('''
-                SELECT event_index, start_day, end_day, start_date_str, end_date_str, 
-                       total_entries, label, days_json 
-                FROM detected_events 
-                WHERE run_id = ? 
+                SELECT event_index, start_day, end_day, start_date_str, end_date_str,
+                       total_entries, label, days_json
+                FROM detected_events
+                WHERE run_id = ?
                 ORDER BY total_entries DESC
             ''', (run_id,))
-            
+
             events = []
             for r in cursor.fetchall():
                 events.append({
@@ -315,7 +416,7 @@ class DatabaseManager:
                     'label': r[6],
                     'days': json.loads(r[7])
                 })
-                
+
             return events
         finally:
             conn.close()
@@ -324,17 +425,17 @@ class DatabaseManager:
         """Save detected events to cache."""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        
+
         try:
             timestamp = datetime.now().isoformat()
-            
+
             # Create run
             cursor.execute(
                 "INSERT INTO event_runs (timestamp, dataset_size) VALUES (?, ?)",
                 (timestamp, dataset_size)
             )
             run_id = cursor.lastrowid
-            
+
             # Insert events
             batch = []
             for e in events:
@@ -349,14 +450,14 @@ class DatabaseManager:
                     e['label'],
                     json.dumps(e['days'])
                 ))
-            
+
             cursor.executemany('''
-                INSERT INTO detected_events 
-                (run_id, event_index, start_day, end_day, start_date_str, end_date_str, 
+                INSERT INTO detected_events
+                (run_id, event_index, start_day, end_day, start_date_str, end_date_str,
                 total_entries, label, days_json)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', batch)
-            
+
             conn.commit()
         except Exception as e:
             conn.rollback()
@@ -364,13 +465,14 @@ class DatabaseManager:
         finally:
             conn.close()
 
-    def get_cached_labels(self, params: Dict[str, Any], dataset_hash: str) -> Optional[np.ndarray]:
+    def get_cached_labels(
+            self, params: Dict[str, Any], dataset_hash: str) -> Optional[np.ndarray]:
         """Retrieve cached clustering labels."""
         params_hash = self._compute_params_hash(params, dataset_hash)
         conn = sqlite3.connect(self.db_path)
         try:
             cursor = conn.execute(
-                "SELECT labels_bytes FROM clustering_results WHERE params_hash = ? AND dataset_hash = ? ORDER BY id DESC LIMIT 1", 
+                "SELECT labels_bytes FROM clustering_results WHERE params_hash = ? AND dataset_hash = ? ORDER BY id DESC LIMIT 1",
                 (params_hash, dataset_hash)
             )
             row = cursor.fetchone()
@@ -382,12 +484,16 @@ class DatabaseManager:
             conn.close()
         return None
 
-    def save_cached_labels(self, params: Dict[str, Any], dataset_hash: str, labels: np.ndarray):
+    def save_cached_labels(self,
+                           params: Dict[str,
+                                        Any],
+                           dataset_hash: str,
+                           labels: np.ndarray):
         """Save clustering labels to cache."""
         params_hash = self._compute_params_hash(params, dataset_hash)
         timestamp = datetime.now().isoformat()
-        labels_bytes = labels.astype(np.int32).tobytes() 
-        
+        labels_bytes = labels.astype(np.int32).tobytes()
+
         conn = sqlite3.connect(self.db_path)
         try:
             conn.execute(
@@ -399,4 +505,3 @@ class DatabaseManager:
             pass
         finally:
             conn.close()
-

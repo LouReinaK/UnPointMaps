@@ -20,3 +20,6 @@ uvicorn
 websockets
 networkx
 langdetect
+sentence-transformers
+openai
+

@@ -50,3 +50,4 @@ ENV/
 Thumbs.db
 *.log
 *.png
+node_modules/
