@@ -18,23 +18,40 @@ def filter_dataset(df):
     print(f"Après suppression des doublons: {len_initial-len(df)} lignes filtrées.")
     len_initial = len(df)
 
-    # Supprimer les doublons de coordonnées
-    df = df.drop_duplicates(subset=['latitude', 'longitude'])
-    print(f"Après suppression des doublons de coordonnées: {len_initial-len(df)} lignes filtrées.")
-    len_initial = len(df)
-
     # Vérifier le format de la date
     df['date'] = pd.to_datetime(df['date'], errors='coerce')
     df = df.dropna(subset=['date'])
     print(f"Après vérification du format de la date: {len_initial-len(df)} lignes filtrées.")
     len_initial = len(df)
+    # Supprimer les dates futures
+    current_date = datetime.now()
+    df = df[df['date'] <= current_date]
+    print(f"Après suppression des dates futures: {len_initial-len(df)} lignes filtrées.")
+    len_initial = len(df)
     
     # Vérifier les coordonnées hors de Lyon
-    lyon_coords = (45.7640, 4.8357)
-    df = df[(df['latitude'].between(lyon_coords[0] - 0.1, lyon_coords[0] + 0.1)) &
-              (df['longitude'].between(lyon_coords[1] - 0.1, lyon_coords[1] + 0.1))]
+    haut_lyon_gauche_coords = (45.82, 4.752)
+    bas_lyon_droite_coords = (45.67, 4.98)
+    df = df[(df['latitude'].between(bas_lyon_droite_coords[0], haut_lyon_gauche_coords[0])) &
+              (df['longitude'].between(haut_lyon_gauche_coords[1], bas_lyon_droite_coords[1]))]
     print(f"Après filtrage des coordonnées hors de Lyon: {len_initial-len(df)} lignes filtrées.")
-    return df
+
+    # Regrouper par coordonnées géographiques
+    # Chaque point représente toutes les photos à cette localisation
+    df_grouped = df.groupby(['latitude', 'longitude']).agg({
+        'id': list,
+        'title': list,
+        'tags': list,
+        'date': list,
+        'user': list
+    }).reset_index()
+    print(f"Après regroupement par coordonnées dans df_groupe: {len_initial} lignes regroupées en {len(df_grouped)} points géographiques.")
+
+    # Vérifier doublons latitude/longitude
+    df=df.drop_duplicates(subset=['latitude', 'longitude'])
+    print(f"Après suppression des doublons géographiques: {len_initial-len(df)} lignes filtrées.")
+
+    return df, df_grouped
 
 def load_and_prepare_data():
     # Charger le CSV
@@ -68,15 +85,23 @@ def load_and_prepare_data():
         
     return df
 
+# Get info by geo point
+def get_info_geo(df: pd.DataFrame, latitude: float, longitude: float) -> dict:
+    """Renvoie les informations d'un point géographique donné"""
+    result = df[(df['latitude'] == latitude) & (df['longitude'] == longitude)]
+    if not result.empty:
+        return result.iloc[0].to_dict()
+    return None
 
 # Convertir en dictionnaire
 def convert_to_dict_filtered():
     df=load_and_prepare_data()
     df_filtered = filter_dataset(df)
-    print(f"Nombre de lignes conservées: {len(df_filtered)}")
-    print(f"Nombre de lignes supprimées: {len(df) - len(df_filtered)} \n")
+    print(f"Nombre de lignes conservées: {len(df_filtered[0])}")
+    print(f"Nombre de lignes supprimées: {len(df) - len(df_filtered[0])} \n")
 
-    return df_filtered
+    return df_filtered[0]
 
 if __name__ == "__main__":
     convert_to_dict_filtered()
+
