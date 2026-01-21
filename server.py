@@ -512,6 +512,21 @@ async def broadcast_clusters(clusters_data: List[Dict]):
         if ws in app_state.active_websockets:
             app_state.active_websockets.remove(ws)
 
+async def broadcast_cluster_remove(cluster_ids: List[Any]):
+    message = json.dumps({
+        "type": "cluster_remove",
+        "cluster_ids": [str(cid) for cid in cluster_ids]
+    })
+    to_remove = []
+    for ws in app_state.active_websockets:
+        try:
+            await ws.send_text(message)
+        except Exception:
+            to_remove.append(ws)
+    for ws in to_remove:
+        if ws in app_state.active_websockets:
+            app_state.active_websockets.remove(ws)
+
 def update_app_state_with_clustering_results(df: pd.DataFrame, labels: np.ndarray, enqueue: bool = True):
     """
     Helper to process clustering results immediately.
@@ -691,10 +706,15 @@ def background_clustering_task(df: pd.DataFrame, params: dict, total_start: floa
                     loop
                 )
             
+            # Track previous cluster IDs before updating
+            previous_cluster_ids = set(app_state.current_clusters.keys())
+            
             # Store clusters and enqueue hull computation (don't broadcast yet)
             # Only compute hulls for new clusters to avoid duplicate work
+            current_cluster_ids = set()
             for i, cluster_data in enumerate(clusters_list):
                 cid = i
+                current_cluster_ids.add(cid)
                 
                 # Extract points and indices
                 if isinstance(cluster_data, (tuple, list)) and len(cluster_data) >= 1:
@@ -726,6 +746,22 @@ def background_clustering_task(df: pd.DataFrame, params: dict, total_start: floa
                     
                     # Enqueue hull computation only for new clusters
                     app_state.hull_queue.put((cid, points))
+            
+            # Find clusters that were removed (split)
+            removed_cluster_ids = previous_cluster_ids - current_cluster_ids
+            
+            # Send cluster remove messages for removed clusters
+            if removed_cluster_ids and loop is not None:
+                asyncio.run_coroutine_threadsafe(
+                    broadcast_cluster_remove(list(removed_cluster_ids)),
+                    loop
+                )
+            
+            # Remove old clusters from app_state
+            for cid in removed_cluster_ids:
+                del app_state.current_clusters[cid]
+                if cid in app_state.broadcasted_clusters:
+                    app_state.broadcasted_clusters.remove(cid)
                 
         elif status == "final":
             final_clusters_data, n_clusters, final_labels = data

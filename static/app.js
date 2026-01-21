@@ -40,6 +40,8 @@ document.addEventListener('DOMContentLoaded', () => {
           updateHull(data.cluster_id, data.points, data.size);
         } else if (data.type === 'cluster_update') {
           renderClusters(data.clusters, true, false); // true = silent, false = don't clear existing
+        } else if (data.type === 'cluster_remove') {
+          removeClusters(data.cluster_ids);
         } else if (data.type === 'progress') {
           // ... existing progress logic ...
           const statusDiv = document.getElementById('status-display');
@@ -370,11 +372,21 @@ document.addEventListener('DOMContentLoaded', () => {
       // Store for updates
       // Add custom property to layer to store label
       polygon._clusterId = clusterId;
+      polygon._currentLabel = c.label || 'Loading...';
             
       // Expand bounds
       c.points.forEach(p => bounds.extend(p));
             
       clusterLayers[clusterId] = polygon;
+    });
+        
+    // Apply any pending labels that arrived before clusters were rendered
+    Object.keys(pendingLabels).forEach(clusterId => {
+      const poly = clusterLayers[clusterId];
+      if (poly) {
+        poly._currentLabel = pendingLabels[clusterId];
+        delete pendingLabels[clusterId];
+      }
     });
         
     // Cleanup old pending labels that didn't match (optional)
@@ -571,6 +583,17 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
     
+  function removeClusters(clusterIds) {
+    console.log('Removing clusters:', clusterIds);
+    clusterIds.forEach(clusterId => {
+      const normalizedId = String(clusterId);
+      if (clusterLayers[normalizedId]) {
+        map.removeLayer(clusterLayers[normalizedId]);
+        delete clusterLayers[normalizedId];
+      }
+    });
+  }
+
   function getRandomColor() {
     const letters = '0123456789ABCDEF';
     let color = '#';
