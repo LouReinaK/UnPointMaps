@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>UnPointMaps - Interactive</title>
+    
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+     integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+     crossorigin=""/>
+     
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<div id="app-container">
+    <div id="sidebar">
+        <h1>UnPointMaps</h1>
+        
+        <div class="panel-section">
+            <h2>View Controls</h2>
+            <button id="reset-view-btn">Readjust Map View</button>
+        </div>
+
+        <div class="panel-section">
+            <h2>Dataset Stats</h2>
+            <div id="stats-display">Loading...</div>
+        </div>
+
+        <div id="status-display" class="panel-section" style="display: none;">
+            <h2>Status</h2>
+            <div id="status-message" style="color: #007bff; font-weight: bold;"></div>
+            <div id="iteration-display" style="font-size: 0.9em; color: #555; margin-top: 5px;"></div>
+        </div>
+        
+        <div class="panel-section">
+            <h2>Filters</h2>
+            
+            <div class="control-group">
+                <label>
+                    Year Range
+                    <input type="checkbox" id="year-all" checked> <small style="font-weight:normal">All</small>
+                </label>
+                <div class="range-inputs" id="year-inputs" style="opacity: 0.5; pointer-events: none;">
+                    <input type="number" id="year-min" placeholder="Min">
+                    <span>-</span>
+                    <input type="number" id="year-max" placeholder="Max">
+                </div>
+            </div>
+            
+            <div class="control-group">
+                <label>
+                    Date Range
+                    <input type="checkbox" id="date-all" checked> <small style="font-weight:normal">All</small>
+                </label>
+                <div class="range-inputs" id="date-inputs" style="opacity: 0.5; pointer-events: none;">
+                    <input type="date" id="date-start">
+                    <span>-</span>
+                    <input type="date" id="date-end">
+                </div>
+            </div>
+            
+            <div class="control-group">
+                <label>
+                    Time of Day
+                    <input type="checkbox" id="hour-all" checked> <small style="font-weight:normal">All</small>
+                </label>
+                <div class="range-inputs" id="hour-inputs" style="opacity: 0.5; pointer-events: none;">
+                    <input type="number" id="hour-start" value="0" min="0" max="23">
+                    <span>-</span>
+                    <input type="number" id="hour-end" value="23" min="0" max="23">
+                </div>
+            </div>
+            
+            <div class="control-group">
+                <label>
+                    Filter Events
+                    <select id="event-mode-select" style="margin-left:5px;">
+                        <option value="exclude">Exclude Selected</option>
+                        <option value="include">Include Only Selected</option>
+                    </select>
+                </label>
+                <div style="margin-bottom: 5px;">
+                     <input type="checkbox" id="events-all"> <small style="font-weight:normal" id="events-all-label">Select All</small>
+                </div>
+                <div id="events-list">
+                    <!-- Events checkboxes injected here -->
+                </div>
+            </div>
+
+            <div class="control-group">
+                <label for="algorithm-select">
+                    Clustering Algorithm
+                </label>
+                <select id="algorithm-select" style="width: 100%; padding: 5px; margin-top: 5px;">
+                    <option value="hdbscan" selected>HDBSCAN (Iterative)</option>
+                    <option value="parallel_hdbscan">HDBSCAN (Parallel)</option>
+                    <option value="dbscan">DBSCAN</option>
+                    <option value="kmeans">K-Means</option>
+                </select>
+            </div>
+
+            <div class="control-group">
+                <label for="labelling-select">
+                    Labelling Method
+                </label>
+                <select id="labelling-select" style="width: 100%; padding: 5px; margin-top: 5px;">
+                    <option value="llm" selected>Generative AI (LLM)</option>
+                    <option value="statistical">Statistical (Keywords)</option>
+                </select>
+            </div>
+            
+            <button id="run-btn">Run Clustering</button>
+        </div>
+        
+        <div class="panel-section">
+            <h2>Tram Line Optimization</h2>
+            <div class="control-group">
+                <label for="tram-length">
+                    Max Length (km)
+                </label>
+                <input type="number" id="tram-length" value="1" min="0.1" max="10" step="0.1">
+            </div>
+            <button id="compute-tram-btn">Compute Tram Line</button>
+        </div>
+        
+        <div class="panel-section">
+            <h2>Cluster Info</h2>
+            <div id="cluster-info">
+                <div id="cluster-info-content">Click a cluster...</div>
+                <div id="cluster-carousel-container" style="display: none;">
+                    <div class="carousel-header">
+                        <h4>Cluster Images</h4>
+                    </div>
+                    <div class="carousel-wrapper">
+                        <div class="carousel-main">
+                            <button id="prev-btn" class="carousel-btn">‹</button>
+                            <div class="carousel-image-container">
+                                <img id="carousel-image" src="" alt="Cluster image" class="carousel-image">
+                            </div>
+                            <button id="next-btn" class="carousel-btn">›</button>
+                        </div>
+                        <div id="carousel-counter" class="carousel-counter"></div>
+                        <div id="thumbnail-container" class="thumbnail-container"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div id="map"></div>
+</div>
+
+<!-- Leaflet JS -->
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+     integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+     crossorigin=""></script>
+<script src="/static/app.js"></script>
+
+</body>
+</html>

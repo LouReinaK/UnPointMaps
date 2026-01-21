@@ -6,9 +6,6 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# HTML files
-*.html
-
 # Distribution / packaging
 .Python
 build/
