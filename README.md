@@ -14,13 +14,13 @@ The project implements a complete knowledge discovery pipeline:
 
 ## Project Objectives
 
-### 🎯 Primary Objectives
+### Primary Objectives
 - **Area Discovery**: Automatically identify localized areas with high photo-taking activity
 - **Algorithm Comparison**: Experiment with k-means, hierarchical clustering, DBSCAN, and HDBSCAN
 - **Text Processing**: Use TF-IDF and association rules to describe areas of interest
 - **Temporal Analysis**: Study how areas evolve over time and identify events
 
-### 📚 Pedagogical Aims
+### Pedagogical Aims
 - Implement techniques for handling large data collections
 - Experiment with clustering algorithms and understand their parameters
 - Apply text processing and natural language techniques
@@ -28,31 +28,31 @@ The project implements a complete knowledge discovery pipeline:
 
 ## Features
 
-### 🔍 Clustering Algorithms Implementation
+### Clustering Algorithms Implementation
 - **K-Means**: Traditional centroid-based clustering with automatic optimal k selection (elbow/silhouette methods)
 - **DBSCAN**: Density-based clustering for arbitrary-shaped clusters and noise detection
 - **Iterative HDBSCAN**: Hierarchical clustering with automatic large cluster splitting
 - **Parallel HDBSCAN**: Multi-threaded version for improved performance on large datasets
 
-### 🎨 Interactive Web Interface
+### Interactive Web Interface
 - Real-time clustering visualization with WebSocket updates
 - Interactive map with cluster boundaries using concave hulls
 - Progress tracking for long-running clustering operations
 - Cluster labeling with AI-generated descriptions
 
-### 🧠 AI-Powered Labeling
+### AI-Powered Labeling
 - LLM integration for automatic cluster description generation
 - Semantic analysis of photo titles, tags, and descriptions
 - Keyword extraction using TF-IDF and word frequency analysis
 - Caching system for efficient re-processing
 
-### 📊 Data Processing & Filtering
+### Data Processing & Filtering
 - Time-based filtering (years, hours, events)
 - Dataset preprocessing and cleaning (duplicate removal, GPS validation)
 - Support for large datasets with efficient caching
 - Flickr API data integration
 
-### 🛠️ Developer-Friendly Architecture
+### Developer-Friendly Architecture
 - RESTful API for integration
 - Command-line interface for batch processing
 - Comprehensive test suite
