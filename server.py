@@ -160,7 +160,7 @@ def labelling_worker():
                 text_sample = valid_texts[:50]
 
                 # Extract Keywords
-                keywords = get_top_keywords(valid_texts, top_n=5)
+                keywords = get_top_keywords(valid_texts, top_n=5, stop_words=None)
                 keyword_list = [k[0] for k in keywords]
                 
                 provisional_label = ", ".join(keyword_list[:3]) if keyword_list else "Processing..."

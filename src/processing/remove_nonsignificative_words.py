@@ -112,12 +112,12 @@ def clean_text_list(texts):
 
 #Supprimer les mots fréquents dans le dataset qui ne sont pas des stopwords ou des mots significatifs
 def remove_frequent_words(texts, threshold=0.5):
-    frequent_words = get_top_keywords(texts, top_n=10)
+    frequent_words = get_top_keywords(texts, top_n=3)
     if pd.isna(texts) or texts == '':
         return texts
-    words = texts.split()
-    filtered_words = [word for word in words if word.lower() not in frequent_words]
-    return ' '.join(filtered_words)
+    words = texts.split(',')
+    filtered_words = [word.strip() for word in words if word.lower() not in frequent_words]
+    return ','.join(filtered_words)
 
 
 def remove_word_lyon(df):

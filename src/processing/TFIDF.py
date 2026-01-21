@@ -15,7 +15,10 @@ def get_top_keywords(texts: List[str], top_n: int = 10,
     try:
         # Combine all texts into one document to find most frequent words in
         # this cluster
-        combined_text = " ".join(texts)
+        if isinstance(texts, list):
+            combined_text = " ".join(texts)
+        else:
+            combined_text = texts
         if not combined_text.strip():
             return []
 
