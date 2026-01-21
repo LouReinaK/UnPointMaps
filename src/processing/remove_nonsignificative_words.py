@@ -2,7 +2,6 @@
 import pandas as pd
 from nltk.corpus import stopwords
 from nltk.tokenize import word_tokenize
-from .dataset_filtering import convert_to_dict_filtered
 from .TFIDF import get_top_keywords
 from langdetect import detect, DetectorFactory
 from collections import Counter
@@ -118,20 +117,16 @@ def clean_df_words(df, threshold=0.5):
     texts=remove_nonsignificant_words_multilang(texts)
     frequent_words = get_top_keywords(texts, top_n=3)
     # Supprimer les mots fréquents du dataset
-    df = df.applymap(lambda x: ' '.join(
+    df = df.map(lambda x: ' '.join(
         word for word in str(x).split() if word.lower() not in frequent_words) if isinstance(x, str) else x)
     return df
 
 
 def remove_word_lyon(df):
     """Supprime le mot 'lyon' d'un dataset donné"""
-    df = df.applymap(lambda x: x.replace('lyon', '') if isinstance(x, str) else x)
+    df = df.map(lambda x: x.replace('lyon', '') if isinstance(x, str) else x)
     return df
     """Supprime le mot 'lyon' d'un dataset donné"""
 
 
-if __name__ == '__main__':
-    df = convert_to_dict_filtered()
-    remove_word_lyon(df)
-    langues_detectees(df)
 
