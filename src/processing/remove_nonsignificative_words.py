@@ -106,6 +106,14 @@ def clean_text_list(texts):
     return cleaned
 
 
+def remove_word_lyon(df):
+    """Supprime le mot 'lyon' d'un dataset donné"""
+    df = df.applymap(lambda x: x.replace('lyon', '') if isinstance(x, str) else x)
+    return df
+    """Supprime le mot 'lyon' d'un dataset donné"""
+
+
 if __name__ == '__main__':
     df = convert_to_dict_filtered()
+    remove_word_lyon(df)
     langues_detectees(df)
