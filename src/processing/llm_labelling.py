@@ -779,11 +779,6 @@ class LLMLabelingService:
             selected_texts = [texts[i] for i in top_indices]
             return selected_texts
         except Exception as e:
-            logger.error(f"Error in representative selection: {e}")
-            return texts[:top_k]
-            return selected_texts
-
-        except Exception as e:
             logger.warning(
                 f"Error in representative sentence selection: {e}. Falling back to simple selection.")
             return texts[:top_k]
