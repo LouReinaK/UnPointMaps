@@ -3,6 +3,7 @@ import pandas as pd
 from nltk.corpus import stopwords
 from nltk.tokenize import word_tokenize
 from .dataset_filtering import convert_to_dict_filtered
+from .TFIDF import get_top_keywords
 from langdetect import detect, DetectorFactory
 from collections import Counter
 
@@ -83,14 +84,16 @@ def process_text_columns(df, text_columns):
     return df
 
 
-def langues_detectees(df):
-    """Affiche les langues détectées dans le dataset"""
-    all_texts = df['title'].tolist() + df['description'].tolist()
-    detected_languages = [detect_language(text) for text in all_texts]
+def langues_detectees(df, n=5000):
+    """Affiche les langues détectées dans le dataset des 5000 premières lignes et les affiche en pourcentage"""
+    all_texts = df['title'].tolist() + df['tags'].tolist()
+    detected_languages = [detect_language(text) for text in all_texts[:n]]
     language_counts = Counter(detected_languages)
+    total = sum(language_counts.values())
     print("Langues détectées dans le dataset:")
     for lang, count in language_counts.most_common():
-        print(f"{lang}: {count} occurrences")
+        percentage = (count / total * 100) if total > 0 else 0
+        print(f"{lang}: ({percentage:.2f}%)")
 
 
 def clean_text_list(texts):
@@ -101,9 +104,20 @@ def clean_text_list(texts):
     cleaned = []
     for t in texts:
         c = remove_nonsignificant_words_multilang(t)
+        c = remove_frequent_words(c)
         if c and c.strip():
             cleaned.append(c)
     return cleaned
+
+
+#Supprimer les mots fréquents dans le dataset qui ne sont pas des stopwords ou des mots significatifs
+def remove_frequent_words(texts, threshold=0.5):
+    frequent_words = get_top_keywords(texts, top_n=10)
+    if pd.isna(text) or text == '':
+        return text
+    words = text.split()
+    filtered_words = [word for word in words if word.lower() not in frequent_words]
+    return ' '.join(filtered_words)
 
 
 def remove_word_lyon(df):
@@ -117,3 +131,4 @@ if __name__ == '__main__':
     df = convert_to_dict_filtered()
     remove_word_lyon(df)
     langues_detectees(df)
+    df = remove_frequent_words(df)
