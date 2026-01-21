@@ -1,5 +1,6 @@
 import pandas as pd
 from datetime import datetime
+from .remove_nonsignificative_words import clean_df_words
 
 
 def filter_dataset(df):
@@ -64,6 +65,8 @@ def filter_dataset(df):
     print(
         f"Après suppression des doublons géographiques: {len_initial-len(df)} lignes filtrées.")
 
+    df = clean_df_words(df)
+    print("==== Filtrage terminé ====\n")
     return df, df_grouped
 
 

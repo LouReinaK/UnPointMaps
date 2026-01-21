@@ -104,20 +104,23 @@ def clean_text_list(texts):
     cleaned = []
     for t in texts:
         c = remove_nonsignificant_words_multilang(t)
-        c = remove_frequent_words(c)
         if c and c.strip():
             cleaned.append(c)
     return cleaned
 
 
 #Supprimer les mots fréquents dans le dataset qui ne sont pas des stopwords ou des mots significatifs
-def remove_frequent_words(texts, threshold=0.5):
+def clean_df_words(df, threshold=0.5):
+    texts = (
+        df['title'].dropna().astype(str).tolist()
+        + df['tags'].dropna().astype(str).tolist()
+    )
+    texts=remove_nonsignificant_words_multilang(texts)
     frequent_words = get_top_keywords(texts, top_n=3)
-    if pd.isna(texts) or texts == '':
-        return texts
-    words = texts.split(',')
-    filtered_words = [word.strip() for word in words if word.lower() not in frequent_words]
-    return ','.join(filtered_words)
+    # Supprimer les mots fréquents du dataset
+    df = df.applymap(lambda x: ' '.join(
+        word for word in str(x).split() if word.lower() not in frequent_words) if isinstance(x, str) else x)
+    return df
 
 
 def remove_word_lyon(df):
@@ -131,4 +134,4 @@ if __name__ == '__main__':
     df = convert_to_dict_filtered()
     remove_word_lyon(df)
     langues_detectees(df)
-    df = remove_frequent_words(df)
+
