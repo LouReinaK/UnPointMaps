@@ -328,7 +328,7 @@ def hull_worker():
                                 "id": str(cluster_id),
                                 "points": hull,
                                 "size": cluster_data["size"],
-                                "temp": str(cluster_id).startswith("temp_"),
+                                
                                 "label": cluster_data.get("label", "Processing...")
                             }]
                         }
@@ -337,7 +337,7 @@ def hull_worker():
                                 "id": str(cluster_id),
                                 "points": hull,
                                 "size": cluster_data["size"],
-                                "temp": str(cluster_id).startswith("temp_"),
+                                
                                 "label": cluster_data.get("label", "Processing...")
                             }]),
                             loop
@@ -694,7 +694,7 @@ def background_clustering_task(df: pd.DataFrame, params: dict, total_start: floa
             # Store clusters and enqueue hull computation (don't broadcast yet)
             # Only compute hulls for new clusters to avoid duplicate work
             for i, cluster_data in enumerate(clusters_list):
-                cid = f"temp_{i}"
+                cid = i
                 
                 # Extract points and indices
                 if isinstance(cluster_data, (tuple, list)) and len(cluster_data) >= 1:
@@ -940,13 +940,11 @@ async def get_cluster_images(cluster_id: str):
     Return image URLs for a specific cluster.
     Resolves real Flickr URLs using oEmbed.
     """
-    # Determine ID type (int or str for 'temp_')
-    c_id: Any = cluster_id
-    if not str(cluster_id).startswith("temp_"):
-        try:
-            c_id = int(cluster_id)
-        except ValueError:
-            pass # keep as string if fails, though usually expect int for final clusters
+    # Convert cluster_id to appropriate type
+    try:
+        c_id = int(cluster_id)
+    except ValueError:
+        c_id = cluster_id
 
     cluster_data = app_state.current_clusters.get(c_id)
     if cluster_data is None:
