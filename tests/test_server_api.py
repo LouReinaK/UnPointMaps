@@ -85,3 +85,58 @@ class TestServerAPI:
 
             # Ensure background task would have been started
             assert mock_thread.called
+
+    def test_tram_line_endpoint(self):
+        # Mock some clusters in app_state
+        from server import app_state
+        app_state.current_clusters = {
+            1: {
+                'points': [[45.0, 4.0], [45.1, 4.1]],
+                'size': 10
+            },
+            2: {
+                'points': [[45.2, 4.2], [45.3, 4.3]],
+                'size': 20
+            }
+        }
+        
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/tram_line",
+                json={"max_length": 0.01}
+            )
+            assert response.status_code == 200
+            data = response.json()
+            assert "path" in data
+            assert isinstance(data["path"], list)
+            assert len(data["path"]) > 0
+            # Each point should be [lat, lon]
+            for point in data["path"]:
+                assert isinstance(point, list)
+                assert len(point) == 2
+                assert isinstance(point[0], float)
+                assert isinstance(point[1], float)
+
+    def test_tram_line_endpoint_no_clusters(self):
+        from server import app_state
+        app_state.current_clusters = {}
+        
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/tram_line",
+                json={"max_length": 0.01}
+            )
+            assert response.status_code == 200
+            data = response.json()
+            assert data["path"] == []
+            assert "error" in data
+
+    def test_tram_line_endpoint_invalid_length(self):
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/tram_line",
+                json={"max_length": -1}
+            )
+            assert response.status_code == 200
+            data = response.json()
+            assert "error" in data

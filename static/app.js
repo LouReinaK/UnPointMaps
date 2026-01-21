@@ -8,6 +8,7 @@ document.addEventListener('DOMContentLoaded', () => {
     
   // State
   let clusterLayers = {}; // id -> L.polygon
+  let tramLineLayer = null; // L.polyline for tram line
   let ws = null;
   let eventsData = [];
   let pendingLabels = {}; // id -> label (for race conditions)
@@ -35,8 +36,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 
         if (data.type === 'label_update') {
           updateLabel(data.cluster_id, data.label);
+        } else if (data.type === 'hull_update') {
+          updateHull(data.cluster_id, data.points, data.size);
         } else if (data.type === 'cluster_update') {
-          renderClusters(data.clusters, true); // true = silent (no alert if empty)
+          renderClusters(data.clusters, true, false); // true = silent, false = don't clear existing
         } else if (data.type === 'progress') {
           // ... existing progress logic ...
           const statusDiv = document.getElementById('status-display');
@@ -242,11 +245,95 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
     
-  function renderClusters(clusters, silent = false) {
+  // Compute Tram Line
+  document.getElementById('compute-tram-btn').addEventListener('click', async () => {
+    const btn = document.getElementById('compute-tram-btn');
+    btn.disabled = true;
+    btn.innerText = 'Computing...';
+    
+    try {
+      const maxLengthKm = parseFloat(document.getElementById('tram-length').value);
+      // Convert km to degrees (approximate: 1 degree lat ~ 111 km)
+      const maxLengthDeg = maxLengthKm / 111;
+      
+      const resp = await fetch('/api/tram_line', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ max_length: maxLengthDeg })
+      });
+      const result = await resp.json();
+      
+      if (result.error) {
+        alert('Error: ' + result.error);
+        return;
+      }
+      
+      // Clear existing tram line
+      if (tramLineLayer) {
+        map.removeLayer(tramLineLayer);
+      }
+      
+      // Draw new tram line
+      if (result.path && result.path.length > 0) {
+        tramLineLayer = L.polyline(result.path, {
+          color: 'red',
+          weight: 4,
+          opacity: 0.8
+        }).addTo(map);
+        
+        // Fit map to show the tram line
+        // map.fitBounds(tramLineLayer.getBounds()); // Manual readjustment now required via button
+        
+        alert('Tram line computed and displayed!');
+      } else {
+        alert('No tram line could be computed.');
+      }
+      
+    } catch (e) {
+      console.error('Tram line error', e);
+      alert('Error computing tram line');
+    } finally {
+      btn.disabled = false;
+      btn.innerText = 'Compute Tram Line';
+    }
+  });
+
+  // Readjust Map View
+  document.getElementById('reset-view-btn').addEventListener('click', () => {
+    const bounds = new L.LatLngBounds();
+    let hasClusters = false;
+
+    Object.values(clusterLayers).forEach(layer => {
+      bounds.extend(layer.getBounds());
+      hasClusters = true;
+    });
+
+    if (tramLineLayer) {
+      bounds.extend(tramLineLayer.getBounds());
+      hasClusters = true;
+    }
+
+    if (hasClusters) {
+      map.fitBounds(bounds);
+    } else {
+      // Default view if no clusters or tram line
+      map.setView([45.767328, 4.833362], 13);
+    }
+  });
+    
+  function renderClusters(clusters, silent = false, clearExisting = true) {
     console.time('Render Clusters Internal');
-    // Clear existing
-    Object.values(clusterLayers).forEach(l => map.removeLayer(l));
-    clusterLayers = {};
+    
+    if (clearExisting) {
+      // Clear existing
+      Object.values(clusterLayers).forEach(l => map.removeLayer(l));
+      clusterLayers = {};
+      // Clear tram line when clusters change
+      if (tramLineLayer) {
+        map.removeLayer(tramLineLayer);
+        tramLineLayer = null;
+      }
+    }
         
     if (clusters.length === 0) {
       if (!silent) alert('No clusters found with current filters.');
@@ -257,6 +344,14 @@ document.addEventListener('DOMContentLoaded', () => {
     const bounds = new L.LatLngBounds();
         
     clusters.forEach(c => {
+      // Normalize cluster ID to string for consistent lookup
+      const clusterId = String(c.id);
+      
+      // If we're not clearing, and cluster already exists, remove it before re-adding
+      if (!clearExisting && clusterLayers[clusterId]) {
+        map.removeLayer(clusterLayers[clusterId]);
+      }
+
       const color = getRandomColor();
       // c.points is [[lat, lon], ...]
       const polygon = L.polygon(c.points, {
@@ -266,42 +361,34 @@ document.addEventListener('DOMContentLoaded', () => {
         weight: 1
       }).addTo(map);
             
-
-            
       polygon.on('click', () => {
-        prioritizeCluster(c.id);
-        displayClusterInfo(c.id, c.size);
-        fetchClusterImages(c.id);
+        prioritizeCluster(clusterId);
+        displayClusterInfo(clusterId, c.size);
+        fetchClusterImages(clusterId);
       });
             
       // Store for updates
       // Add custom property to layer to store label
-      polygon._clusterId = c.id;
-            
-      // Check pending labels
-      // if (pendingLabels[c.id]) {
-      //   polygon._currentLabel = pendingLabels[c.id];
-      //   polygon.setTooltipContent(pendingLabels[c.id]);
-      //   // Remove from pending? Maybe keep it for safety or just depend on layer property
-      // }
+      polygon._clusterId = clusterId;
             
       // Expand bounds
       c.points.forEach(p => bounds.extend(p));
             
-      clusterLayers[c.id] = polygon;
+      clusterLayers[clusterId] = polygon;
     });
         
     // Cleanup old pending labels that didn't match (optional)
     // pendingLabels = {}; 
         
-    map.fitBounds(bounds);
+    // map.fitBounds(bounds); // Manual readjustment now required via button
     console.timeEnd('Render Clusters Internal');
   }
     
   function updateLabel(clusterId, label) {
     console.log('Updating label for', clusterId, ':', label);
     // Normalize ID to string for lookup
-    const poly = clusterLayers[clusterId];
+    const normalizedClusterId = String(clusterId);
+    const poly = clusterLayers[normalizedClusterId];
         
     if (poly) {
       poly._currentLabel = label;
@@ -309,7 +396,7 @@ document.addEventListener('DOMContentLoaded', () => {
       // poly.setTooltipContent(label);
             
       // Normalize for comparison
-      if (String(currentClusterId) === String(clusterId)) {
+      if (String(currentClusterId) === normalizedClusterId) {
         console.log('Updating displayed info for', clusterId);
         const infoContent = document.getElementById('cluster-info-content');
         // We need to match the specific DOM structure created in displayClusterInfo
@@ -321,11 +408,32 @@ document.addEventListener('DOMContentLoaded', () => {
           console.warn('Label element not found in DOM');
         }
         // Refetch images in case metadata was updated
-        fetchClusterImages(clusterId);
+        fetchClusterImages(normalizedClusterId);
       }
     } else {
       console.warn('Cluster layer not found for id:', clusterId, ' - queuing as pending.');
-      pendingLabels[clusterId] = label;
+      pendingLabels[normalizedClusterId] = label;
+    }
+  }
+    
+  function updateHull(clusterId, points, size) {
+    console.log('Updating hull for', clusterId, 'with', points.length, 'points');
+    // Normalize ID to string for lookup
+    const normalizedClusterId = String(clusterId);
+    const poly = clusterLayers[normalizedClusterId];
+        
+    if (poly) {
+      // Update the polygon geometry
+      poly.setLatLngs(points);
+      
+      // Update size if provided
+      if (size !== undefined) {
+        poly._clusterSize = size;
+      }
+      
+      console.log('Hull updated for cluster', clusterId);
+    } else {
+      console.warn('Cluster layer not found for hull update:', clusterId);
     }
   }
     

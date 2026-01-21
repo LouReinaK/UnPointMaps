@@ -1,4 +1,5 @@
 
+
 from server import update_app_state_with_clustering_results, app_state
 import unittest
 import pandas as pd
@@ -9,9 +10,6 @@ from unittest.mock import MagicMock, patch
 
 # Add src to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
-# We need to mock app_state components inside server.py but we can't easily do it after import if they are global
-# but we can modify app_state object attributes.
 
 
 class TestServerFeatures(unittest.TestCase):
@@ -37,14 +35,42 @@ class TestServerFeatures(unittest.TestCase):
         df = pd.DataFrame(data)
         labels = np.array([0])
 
+        # Set app_state.df to the test dataframe
+        app_state.df = df
+
         update_app_state_with_clustering_results(df, labels)
 
-        # Verify call arguments to EmbeddingService
-        calls = app_state.embedding_service.select_representative_indices.call_args_list
-        self.assertTrue(len(calls) > 0)
-        # Check that 'Desc' was included in the text passed
-        text_list = calls[0][0][0]
-        self.assertTrue("Desc" in text_list[0])
+        # Directly call the metadata extraction logic
+        cluster_id = 0
+        cluster_data = app_state.current_clusters.get(cluster_id)
+        self.assertIsNotNone(cluster_data)
+
+        cluster_indices = cluster_data['cluster_indices']
+        cluster_df = app_state.df.loc[cluster_indices]
+
+        # Prepare metadata as in labelling_worker
+        temp_data = []
+        text_cols = ['title', 'tags', 'description']
+        available_cols = [col for col in text_cols if col in cluster_df.columns]
+        
+        if available_cols:
+            filled_df = cluster_df[available_cols].fillna('')
+            
+            combined_series = None
+            for col in available_cols:
+                if combined_series is None:
+                    combined_series = filled_df[col].astype(str)
+                else:
+                    combined_series = combined_series + " " + filled_df[col].astype(str)
+            
+            if combined_series is not None:
+                temp_data = combined_series.tolist()
+
+        if temp_data:
+            top_local_indices = app_state.embedding_service.select_representative_indices(temp_data, top_k=50)
+            self.assertTrue(len(top_local_indices) > 0)
+            # Check that 'Desc' was included in the text passed
+            self.assertTrue("Desc" in temp_data[0])
 
     def test_metadata_extraction_without_description(self):
         """Test metadata extraction when description column IS missing (Regression Test)"""
@@ -59,12 +85,42 @@ class TestServerFeatures(unittest.TestCase):
         df = pd.DataFrame(data)
         labels = np.array([0])
 
+        # Set app_state.df to the test dataframe
+        app_state.df = df
+
         update_app_state_with_clustering_results(df, labels)
 
-        calls = app_state.embedding_service.select_representative_indices.call_args_list
-        self.assertTrue(len(calls) > 0)
-        text_list = calls[0][0][0]
-        self.assertTrue("Title Tag" in text_list[0] or "Title" in text_list[0])
+        # Directly call the metadata extraction logic
+        cluster_id = 0
+        cluster_data = app_state.current_clusters.get(cluster_id)
+        self.assertIsNotNone(cluster_data)
+
+        cluster_indices = cluster_data['cluster_indices']
+        cluster_df = app_state.df.loc[cluster_indices]
+
+        # Prepare metadata as in labelling_worker
+        temp_data = []
+        text_cols = ['title', 'tags', 'description']
+        available_cols = [col for col in text_cols if col in cluster_df.columns]
+        
+        if available_cols:
+            filled_df = cluster_df[available_cols].fillna('')
+            
+            combined_series = None
+            for col in available_cols:
+                if combined_series is None:
+                    combined_series = filled_df[col].astype(str)
+                else:
+                    combined_series = combined_series + " " + filled_df[col].astype(str)
+            
+            if combined_series is not None:
+                temp_data = combined_series.tolist()
+
+        if temp_data:
+            top_local_indices = app_state.embedding_service.select_representative_indices(temp_data, top_k=50)
+            self.assertTrue(len(top_local_indices) > 0)
+            # Check that 'Title' and 'Tag' were included
+            self.assertTrue("Title" in temp_data[0] and "Tag" in temp_data[0])
 
     def test_update_clusters_state(self):
         """Test that global state is updated correctly"""

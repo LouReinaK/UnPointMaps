@@ -31,6 +31,7 @@ from src.processing.remove_nonsignificative_words import clean_text_list
 from src.processing.TFIDF import get_top_keywords
 from src.utils.hull_logic import compute_cluster_hulls
 from src.database.manager import DatabaseManager
+from src.processing.tram_line import compute_tram_line
 
 
 # Configure logging
@@ -52,6 +53,12 @@ class AppState:
         self.db_manager: Optional[DatabaseManager] = None 
         self.embedding_service: Optional[EmbeddingService] = None
         self.labelling_method: str = "llm" # "llm" or "statistical"
+        # Hull computation
+        self.hull_queue: queue.Queue = queue.Queue()
+        self.hull_thread: Optional[threading.Thread] = None
+        self.stop_hull_flag = threading.Event()
+        # Track which clusters have been broadcasted to frontend
+        self.broadcasted_clusters: Set[Any] = set()
 
 app_state = AppState()
 
@@ -283,6 +290,93 @@ def labelling_worker():
         except Exception as e:
             logger.error(f"Worker Exception: {e}")
 
+# Hull Computation Worker
+def hull_worker():
+    logger.info("Hull computation worker started.")
+    
+    while not app_state.stop_hull_flag.is_set():
+        try:
+            # Get hull computation request: (cluster_id, points_list)
+            cluster_id, points_list = app_state.hull_queue.get(timeout=1)
+            
+            logger.info(f"Computing hull for cluster {cluster_id}")
+            
+            # Compute hull
+            hull = []
+            try:
+                # Use concave hull with fixed alpha for more consistent results
+                hulls_list = compute_cluster_hulls([points_list], alpha=0.01, auto_alpha_quantile=0.5)
+                hull = hulls_list[0] if hulls_list else []
+                
+                logger.info(f"Hull computed for cluster {cluster_id}: {len(points_list)} input points -> {len(hull)} hull points")
+                
+            except Exception as e:
+                logger.error(f"Hull computation failed for {cluster_id}: {e}")
+            
+            # Update cluster data
+            if cluster_id in app_state.current_clusters:
+                app_state.current_clusters[cluster_id]["points"] = hull
+                
+                # Check if this cluster has been broadcasted to frontend
+                if cluster_id not in app_state.broadcasted_clusters:
+                    # First time - broadcast as new cluster
+                    if loop is not None:
+                        cluster_data = app_state.current_clusters[cluster_id]
+                        cluster_message = {
+                            "type": "cluster_update",
+                            "clusters": [{
+                                "id": str(cluster_id),
+                                "points": hull,
+                                "size": cluster_data["size"],
+                                "temp": str(cluster_id).startswith("temp_"),
+                                "label": cluster_data.get("label", "Processing...")
+                            }]
+                        }
+                        asyncio.run_coroutine_threadsafe(
+                            broadcast_clusters([{
+                                "id": str(cluster_id),
+                                "points": hull,
+                                "size": cluster_data["size"],
+                                "temp": str(cluster_id).startswith("temp_"),
+                                "label": cluster_data.get("label", "Processing...")
+                            }]),
+                            loop
+                        )
+                    app_state.broadcasted_clusters.add(cluster_id)
+                else:
+                    # Already broadcasted - send hull update
+                    if loop is not None:
+                        cluster_data = app_state.current_clusters[cluster_id]
+                        update_message = {
+                            "type": "hull_update",
+                            "cluster_id": str(cluster_id),
+                            "points": hull,
+                            "size": cluster_data["size"]
+                        }
+                        asyncio.run_coroutine_threadsafe(
+                            broadcast_hull_update(update_message),
+                            loop
+                        )
+            
+            app_state.hull_queue.task_done()
+            
+        except queue.Empty:
+            continue
+        except Exception as e:
+            logger.error(f"Hull worker exception: {e}")
+
+async def broadcast_hull_update(update_data: Dict):
+    message = json.dumps(update_data)
+    to_remove = []
+    for ws in app_state.active_websockets:
+        try:
+            await ws.send_text(message)
+        except Exception:
+            to_remove.append(ws)
+    for ws in to_remove:
+        if ws in app_state.active_websockets:
+            app_state.active_websockets.remove(ws)
+
 async def broadcast_label(cluster_id: str, label: str):
     message = json.dumps({
         "type": "label_update",
@@ -349,12 +443,19 @@ async def lifespan(app: FastAPI):
     app_state.labelling_thread = threading.Thread(target=labelling_worker, daemon=True)
     app_state.labelling_thread.start()
     
+    # Start Hull Worker
+    app_state.hull_thread = threading.Thread(target=hull_worker, daemon=True)
+    app_state.hull_thread.start()
+    
     yield
     
     # Cleanup
     app_state.stop_labelling_flag.set()
+    app_state.stop_hull_flag.set()
     if app_state.labelling_thread:
         app_state.labelling_thread.join()
+    if app_state.hull_thread:
+        app_state.hull_thread.join()
 
 app = FastAPI(lifespan=lifespan)
 
@@ -428,6 +529,7 @@ def update_app_state_with_clustering_results(df: pd.DataFrame, labels: np.ndarra
     
     app_state.labelled_cluster_ids.clear()
     app_state.current_clusters.clear()
+    app_state.broadcasted_clusters.clear()
     
     result_clusters = []
     unique_labels = sorted([label for label in np.unique(labels) if label != -1])
@@ -437,20 +539,12 @@ def update_app_state_with_clustering_results(df: pd.DataFrame, labels: np.ndarra
         cluster_df = df[df['cluster_label'] == cluster_id]
         points = cluster_df[['latitude', 'longitude']].values.tolist()
         
-        # Compute Hull
-        try:
-            hull_points_list = compute_cluster_hulls([points], alpha=None)[0]
-            hull_points = hull_points_list
-        except Exception as e:
-            logger.error(f"Hull error for {cluster_id}: {e}")
-            hull_points = points
-
-        # Store basic info; metadata will be computed in labelling worker
+        # Store basic info with placeholder hull (raw points); proper hull computation will be enqueued
         cluster_indices = cluster_df.index.tolist()
         
         app_state.current_clusters[cluster_id] = {
             "size": len(cluster_df),
-            "points": hull_points, 
+            "points": points,  # Placeholder: raw points - will be updated when proper hull computation completes
             "text_metadata": [],  # placeholder
             "keywords": [],  # placeholder
             "sample_ids": [],  # placeholder
@@ -459,12 +553,15 @@ def update_app_state_with_clustering_results(df: pd.DataFrame, labels: np.ndarra
             "label": "Processing..."
         }
         
+        # Enqueue hull computation
+        app_state.hull_queue.put((cluster_id, points))
+        
         if enqueue:
             app_state.labelling_queue.put((10, cluster_id, 0)) 
         
         result_clusters.append({
             "id": cluster_id,
-            "points": hull_points,
+            "points": [], # Don't send hull points yet
             "size": len(cluster_df),
             "label": "Processing..."
         })
@@ -577,7 +674,7 @@ def background_clustering_task(df: pd.DataFrame, params: dict, total_start: floa
         status, data = item
         
         if status == "intermediate":
-            # Just broadcast visualization
+            # Store intermediate clusters but don't broadcast until hulls are computed
             if isinstance(data, (tuple, list)) and len(data) == 2 and isinstance(data[1], int):
                 clusters_list, iteration = data
             else:
@@ -593,75 +690,42 @@ def background_clustering_task(df: pd.DataFrame, params: dict, total_start: floa
                     broadcast_progress(msg, iteration=iteration),
                     loop
                 )
-            clusters_for_ws = []
             
-            # Compute hulls for intermediate clusters (potentially parallelize this if slow)
-            # Or just send the first N hulls to save time/bandwidth
-            
-            # Note: We need temporary IDs.
-            # Using points directly might be too heavy if we send ALL points. 
-            # compute_cluster_hulls reduces them to polygons.
-            
-            # Optimization: compute hulls in batches or parallel? 
-            # For now, sequential.
-            try:
-                # Extract points only for hull computation
-                # Each item in clusters_list is (points, indices)
-                try:
-                    points_only_list = [c[0] for c in clusters_list]
-                except Exception:
-                    # Fallback if structure is wrong (e.g. parallel hdbscan not updated yet)
-                    points_only_list = clusters_list
-
-                t0 = time.time()
-                # compute_cluster_hulls takes List[List[List[float]]] -> List[List[List[float]]] (hulls)
-                # It handles exceptions internally? No, returns list corresponding to inputs.
-                hulls_list = compute_cluster_hulls(points_only_list, alpha=None)
-                dt = time.time() - t0
+            # Store clusters and enqueue hull computation (don't broadcast yet)
+            # Only compute hulls for new clusters to avoid duplicate work
+            for i, cluster_data in enumerate(clusters_list):
+                cid = f"temp_{i}"
                 
-                logger.info(f"Iteration {iteration if iteration else '?'} hull computation for {len(clusters_list)} clusters took {dt:.4f}s")
-                iteration_times.append({
-                    "iteration": iteration if iteration is not None else "?",
-                    "count": len(clusters_list),
-                    "time": dt
-                })
+                # Extract points and indices
+                if isinstance(cluster_data, (tuple, list)) and len(cluster_data) >= 1:
+                    points = cluster_data[0]
+                else:
+                    points = cluster_data
                 
-                for i, hull in enumerate(hulls_list):
-                    cid = f"temp_{i}"
+                if isinstance(cluster_data, (tuple, list)) and len(cluster_data) >= 2:
+                    indices = cluster_data[1]
+                    size = len(indices)
+                    sample_ids = indices[:20]
+                else:
+                    indices = list(range(len(points)))
+                    size = len(points)
+                    sample_ids = indices[:20]
+                
+                # Check if cluster already exists in app_state to avoid duplicate computation
+                if cid not in app_state.current_clusters:
+                    # Store in app_state with raw points (no placeholder hull)
+                    app_state.current_clusters[cid] = {
+                         "size": size,
+                         "points": points,  # Raw points - will be replaced with hull when computed
+                         "text_metadata": [],
+                         "keywords": [],
+                         "sample_ids": sample_ids,
+                         "image_urls": [], 
+                         "label": "Clustering..."
+                    }
                     
-                    # Store metadata for preview if available
-                    sample_ids = []
-                    if i < len(clusters_list) and isinstance(clusters_list[i], (tuple, list)) and len(clusters_list[i]) >= 2:
-                        indices = clusters_list[i][1]
-                        # Take sample for preview (e.g. first 20)
-                        sample_ids = indices[:20] 
-                        
-                        # Store in app_state so API can retrieve images
-                        app_state.current_clusters[cid] = {
-                             "size": len(indices),
-                             "points": hull,
-                             "text_metadata": [],
-                             "keywords": [],
-                             "sample_ids": sample_ids,
-                             "image_urls": [], 
-                             "label": "Clustering..."
-                        }
-
-                    clusters_for_ws.append({
-                        "id": cid,
-                        "points": hull,
-                        "size": len(clusters_list[i]), 
-                        "temp": True,
-                        "label": "Clustering..."
-                    })
-                   
-                if loop is not None:
-                    asyncio.run_coroutine_threadsafe(
-                        broadcast_clusters(clusters_for_ws),
-                        loop
-                    )
-            except Exception as e:
-                logger.error(f"Error computing intermediate hulls: {e}")
+                    # Enqueue hull computation only for new clusters
+                    app_state.hull_queue.put((cid, points))
                 
         elif status == "final":
             final_clusters_data, n_clusters, final_labels = data
@@ -689,15 +753,10 @@ def background_clustering_task(df: pd.DataFrame, params: dict, total_start: floa
                     loop
                 )
             
-            # Update state fully
+            # Update state fully (hulls will be computed asynchronously)
             result_clusters = update_app_state_with_clustering_results(df, final_labels, enqueue=False)
             
-            # Broadcast Final Result
-            if loop is not None:
-                asyncio.run_coroutine_threadsafe(
-                    broadcast_clusters(result_clusters),
-                    loop
-                )
+            # Don't broadcast yet - wait for hulls to be computed
             
             # Now enqueue for labelling
             for cluster in result_clusters:
@@ -934,6 +993,37 @@ async def get_cluster_images(cluster_id: str):
         })
     
     return {"images": image_data, "cluster_id": cluster_id}
+
+
+@app.post("/api/tram_line")
+async def compute_tram_line_endpoint(params: dict):
+    """
+    Compute optimal tram line path.
+    
+    Params:
+    {
+        "max_length": 0.01  # in degrees (approx 1km)
+    }
+    """
+    max_length = params.get("max_length", 0.01)
+    if max_length <= 0:
+        return {"error": "max_length must be positive"}
+    
+    # Get current clusters
+    clusters = []
+    for cluster_id, cluster_data in app_state.current_clusters.items():
+        clusters.append({
+            "id": cluster_id,
+            "points": cluster_data["points"],
+            "size": cluster_data["size"]
+        })
+    
+    if not clusters:
+        return {"path": [], "error": "No clusters available"}
+    
+    path = compute_tram_line(clusters, max_length)
+    
+    return {"path": path}
 
 
 @app.websocket("/ws")

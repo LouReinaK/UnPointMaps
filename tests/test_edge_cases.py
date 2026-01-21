@@ -77,13 +77,17 @@ def test_edge_cases():
 
     # Test 7: Two separate blobs (might produce MultiPolygon)
     print("\nTest 7: Two separate blobs")
+    rng1 = np.random.default_rng(42)
+    rng2 = np.random.default_rng(43)
+    rng3 = np.random.default_rng(44)
+    
     blob1 = [[x, y] for x, y in zip(
-        np.random.RandomState(42).normal(0, 0.3, 8),
-        np.random.RandomState(42).normal(0, 0.3, 8)
+        rng1.normal(0, 0.3, 8),
+        rng1.normal(0, 0.3, 8)
     )]
     blob2 = [[x, y] for x, y in zip(
-        np.random.RandomState(43).normal(5, 0.3, 8),
-        np.random.RandomState(43).normal(5, 0.3, 8)
+        rng2.normal(5, 0.3, 8),
+        rng2.normal(5, 0.3, 8)
     )]
     two_blobs = blob1 + blob2
     try:
@@ -96,8 +100,8 @@ def test_edge_cases():
     # Test 8: Very large alpha (should produce convex-like hull)
     print("\nTest 8: Very large alpha (10.0)")
     points = [[x, y] for x, y in zip(
-        np.random.RandomState(44).uniform(0, 5, 15),
-        np.random.RandomState(44).uniform(0, 5, 15)
+        rng3.uniform(0, 5, 15),
+        rng3.uniform(0, 5, 15)
     )]
     try:
         hull = vis.get_alpha_shape(points, alpha=10.0)

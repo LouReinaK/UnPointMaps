@@ -87,7 +87,9 @@ h2 {
     font-size: 0.85em;
 }
 
-button#run-btn {
+button#run-btn, 
+button#compute-tram-btn, 
+button#reset-view-btn {
     width: 100%;
     padding: 10px;
     background-color: #007bff;
@@ -97,9 +99,12 @@ button#run-btn {
     cursor: pointer;
     font-weight: bold;
     transition: background-color 0.2s;
+    margin-top: 5px;
 }
 
-button#run-btn:hover {
+button#run-btn:hover,
+button#compute-tram-btn:hover,
+button#reset-view-btn:hover {
     background-color: #0056b3;
 }
 
