@@ -33,11 +33,41 @@ from src.clustering.clustering import kmeans_clustering
 from src.clustering.dbscan_clustering import dbscan_clustering
 from src.clustering.parallel_hdbscan_clustering import parallel_hdbscan_iterative_generator
 from src.processing.llm_labelling import ConfigManager, LLMLabelingService
-from src.processing.remove_nonsignificative_words import clean_text_list
+from src.processing.remove_nonsignificative_words import clean_text_list, set_cache_enabled
 from src.processing.TFIDF import get_top_keywords
 from src.utils.hull_logic import compute_cluster_hulls
 from src.database.manager import DatabaseManager
 from src.processing.tram_line import compute_tram_line
+
+
+# --- Configuration ---
+HOST = "localhost"
+PORT = 8000
+DB_PATH = "unpointmaps_cache.db"
+DATASET_FILE = "flickr_data2.csv"
+
+# --- Cache Settings ---
+USE_DATA_CACHE = True
+USE_CLUSTERING_CACHE = True
+USE_TEXT_CLEANING_CACHE = True
+USE_LLM_CACHE = True
+
+# --- Clustering Parameters ---
+MIN_CLUSTER_SIZE = 3
+CLUSTER_SELECTION_EPSILON = 5 / 10000.0  # Approx 0.5 meters in degrees
+MAX_STD_DEV = 30.0
+
+# --- Hull Generation Parameters ---
+# alpha parameter for concave hull
+# - Smaller values (e.g., 0.01) = tighter, more concave hulls
+# - Larger values (e.g., 5.0) = looser hulls
+ALPHA_VALUE = 0.01
+ALPHA_QUANTILE = 0.5
+
+# --- Labeling Parameters ---
+# Amount of points to sample from each cluster for semantic/spatial selection
+MAX_METADATA_SAMPLES = 50
+MAX_KEYWORDS = 5
 
 
 # Configure logging
@@ -129,7 +159,7 @@ def labelling_worker():
                             if combined_series is not None:
                                 temp_data = combined_series.tolist()
                         if temp_data:
-                            top_local_indices = app_state.embedding_service.select_representative_indices(temp_data, top_k=50)
+                            top_local_indices = app_state.embedding_service.select_representative_indices(temp_data, top_k=MAX_METADATA_SAMPLES)
                             
                             representative_df = cluster_df.iloc[top_local_indices]
                             sample_ids = representative_df.index.tolist()
@@ -146,13 +176,13 @@ def labelling_worker():
                         centroid_lon: float = np.mean(lons)
                         dists = (lats - centroid_lat)**2 + (lons - centroid_lon)**2
                         sorted_indices = np.argsort(dists)
-                        n_sample = min(50, len(cluster_df))
+                        n_sample = min(MAX_METADATA_SAMPLES, len(cluster_df))
                         top_indices = sorted_indices[:n_sample]
                         representative_df = cluster_df.iloc[top_indices]
                         sample_ids = representative_df.index.tolist()
                     except Exception as e:
                         logger.error(f"Spatial fallback failed for cluster {cluster_id}: {e}")
-                        representative_df = cluster_df.head(50)
+                        representative_df = cluster_df.head(MAX_METADATA_SAMPLES)
                         sample_ids = representative_df.index.tolist()
 
                 # Extract Text
@@ -163,10 +193,10 @@ def labelling_worker():
                 
                 cleaned_texts = clean_text_list(texts)
                 valid_texts = [t for t in cleaned_texts if len(t) > 3]
-                text_sample = valid_texts[:50]
+                text_sample = valid_texts[:MAX_METADATA_SAMPLES]
 
                 # Extract Keywords
-                keywords = get_top_keywords(valid_texts, top_n=5, stop_words=None)
+                keywords = get_top_keywords(valid_texts, top_n=MAX_KEYWORDS, stop_words=None)
                 keyword_list = [k[0] for k in keywords]
                 
                 provisional_label = ", ".join(keyword_list[:3]) if keyword_list else "Processing..."
@@ -311,7 +341,7 @@ def hull_worker():
             hull = []
             try:
                 # Use concave hull with fixed alpha for more consistent results
-                hulls_list = compute_cluster_hulls([points_list], alpha=0.01, auto_alpha_quantile=0.5)
+                hulls_list = compute_cluster_hulls([points_list], alpha=ALPHA_VALUE, auto_alpha_quantile=ALPHA_QUANTILE)
                 hull = hulls_list[0] if hulls_list else []
                 
                 logger.info(f"Hull computed for cluster {cluster_id}: {len(points_list)} input points -> {len(hull)} hull points")
@@ -426,20 +456,31 @@ async def lifespan(app: FastAPI):
     global loop
     loop = asyncio.get_running_loop()
     
+    # Configure shared component caches
+    set_cache_enabled(USE_TEXT_CLEANING_CACHE)
+
     # Init TimeFilter lazy
     app_state.time_filter = TimeFilter()
     
     # Init DB Manager
-    app_state.db_manager = DatabaseManager()
+    app_state.db_manager = DatabaseManager(DB_PATH)
 
     # Init Embedding Service
     app_state.embedding_service = EmbeddingService.get_instance()
     app_state.embedding_service.load_model()
 
-    # Load Data
+    # Load Data (with Cache)
     logger.info("Loading dataset...")
-    app_state.df = convert_to_dict_filtered()
-    logger.info(f"Dataset loaded: {len(app_state.df)} records.")
+    cached_df = app_state.db_manager.get_processed_data_cache(DATASET_FILE) if USE_DATA_CACHE else None
+    if cached_df is not None:
+        logger.info(f"Loaded processed dataset from cache ({len(cached_df)} records)")
+        app_state.df = cached_df
+    else:
+        logger.info("Cache miss or file changed, processing dataset from scratch...")
+        app_state.df = convert_to_dict_filtered()
+        if USE_DATA_CACHE:
+            app_state.db_manager.save_processed_data_cache(DATASET_FILE, app_state.df)
+        logger.info(f"Dataset processed (Cache: {'Saved' if USE_DATA_CACHE else 'Disabled'}): {len(app_state.df)} records.")
     
     # Detect Events
     logger.info("Detecting events...")
@@ -602,7 +643,7 @@ def background_clustering_task(df: pd.DataFrame, params: dict, total_start: floa
     cache_check_start = time.time()
     try:
         dataset_hash = hashlib.sha256(np.array(pd.util.hash_pandas_object(df, index=True)).tobytes()).hexdigest()
-        if app_state.db_manager:
+        if app_state.db_manager and USE_CLUSTERING_CACHE:
             cached_labels = app_state.db_manager.get_cached_labels(params, dataset_hash)
             if cached_labels is not None:
                 cache_check_time = time.time() - cache_check_start
@@ -634,25 +675,21 @@ def background_clustering_task(df: pd.DataFrame, params: dict, total_start: floa
     cache_check_time = time.time() - cache_check_start
     logger.info(f"Cache check took {cache_check_time:.4f}s - No cache found, proceeding with computation.")
 
-    min_cluster_size = 3
-    cluster_selection_epsilon = 5 / 10000.0
-    max_std_dev = 30.0
-    
     algo = params.get("algorithm", "hdbscan")
     
     if algo == "parallel_hdbscan":
         gen = parallel_hdbscan_iterative_generator(
             df,
-            min_cluster_size=min_cluster_size,
-            cluster_selection_epsilon=cluster_selection_epsilon,
-            max_std_dev=max_std_dev
+            min_cluster_size=MIN_CLUSTER_SIZE,
+            cluster_selection_epsilon=CLUSTER_SELECTION_EPSILON,
+            max_std_dev=MAX_STD_DEV
         )
     else: # Normal iterative hdbscan
         gen = hdbscan_iterative_generator(
             df,
-            min_cluster_size=min_cluster_size,
-            cluster_selection_epsilon=cluster_selection_epsilon,
-            max_std_dev=max_std_dev
+            min_cluster_size=MIN_CLUSTER_SIZE,
+            cluster_selection_epsilon=CLUSTER_SELECTION_EPSILON,
+            max_std_dev=MAX_STD_DEV
         )
     
     # Run generator in a separate thread and use a queue to decouple processing
@@ -774,7 +811,7 @@ def background_clustering_task(df: pd.DataFrame, params: dict, total_start: floa
             logger.info(f"Background clustering complete: {n_clusters} clusters.")
             
             # Save to cache
-            if app_state.db_manager:
+            if app_state.db_manager and USE_CLUSTERING_CACHE:
                 try:
                     app_state.db_manager.save_cached_labels(params, dataset_hash, final_labels)
                 except Exception as e:
@@ -1093,4 +1130,4 @@ if __name__ == "__main__":
         print("Error: 'fastapi' or 'uvicorn' libraries are missing. Cannot start server.")
         print("Please install them with: pip install fastapi uvicorn")
     else:
-        uvicorn.run(app, host="localhost", port=8000)
+        uvicorn.run(app, host=HOST, port=PORT)

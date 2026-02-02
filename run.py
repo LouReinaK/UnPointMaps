@@ -11,15 +11,20 @@ from src.visualization.map_visualisation import Visualisation
 from src.utils.hull_logic import compute_cluster_hulls
 from src.processing.llm_labelling import ConfigManager, LLMLabelingService
 from src.database.manager import DatabaseManager
-from src.processing.remove_nonsignificative_words import clean_text_list
+from src.processing.remove_nonsignificative_words import clean_text_list, set_cache_enabled
 from src.cli_menu import CLIMenu
 from src.utils.dependency_utils import HAS_HDBSCAN, HAS_OPENAI, HAS_FOLIUM, HAS_MATPLOTLIB
 
 # Configuration
-USE_CACHE = True
 DB_PATH = "unpointmaps_cache.db"
 USE_PARALLEL_CLUSTERING = True  # Enable parallel processing by default
 DATASET_FILE = "flickr_data2.csv"
+
+# Cache Settings
+USE_DATA_CACHE = True
+USE_CLUSTERING_CACHE = True
+USE_TEXT_CLEANING_CACHE = True
+USE_LLM_CACHE = True
 
 # Clustering Parameters
 MIN_CLUSTER_SIZE = 3
@@ -43,13 +48,32 @@ TEST_CLUSTERS = False  # Set to True to only test clustering and exit
 TEST_HULLS = False    # Set to True to preview hulls on matplotlib and exit
 ADD_POINTS = False    # Set to True to add individual points to the map
 # Set to True to automatically open the generated map in a web browser
-AUTO_OPEN_BROWSER = False
+AUTO_OPEN_BROWSER = True
 
 
 def main():
     print("--- Starting UnPointMaps ---")
+    
+    # Configure shared component caches
+    set_cache_enabled(USE_TEXT_CLEANING_CACHE)
+
     print("Loading and filtering dataset...")
-    df = convert_to_dict_filtered()
+    
+    # Init DB Manager for data cache
+    db_manager = DatabaseManager(DB_PATH)
+    
+    # Load Data (with persistent Cache)
+    cached_df = db_manager.get_processed_data_cache(DATASET_FILE) if USE_DATA_CACHE else None
+    if cached_df is not None:
+        print(f"Loaded processed dataset from cache ({len(cached_df)} records)")
+        df = cached_df
+    else:
+        print("Cache miss or file changed, processing dataset from scratch (this may take a while)...")
+        df = convert_to_dict_filtered()
+        if USE_DATA_CACHE:
+            db_manager.save_processed_data_cache(DATASET_FILE, df)
+        print(f"Dataset processed: {len(df)} records.")
+
     if LIMIT != -1:
         print(f"Limiting dataset to first {LIMIT} points for performance...")
         df = df.head(LIMIT)
@@ -73,8 +97,7 @@ def main():
             f"  Parallel execution: Enabled (Workers: {multiprocessing.cpu_count()})")
     print()
 
-    # Prepare Cache and Parameters
-    db_manager = DatabaseManager(DB_PATH)
+    # Prepare Parameters
     clustering_params = {
         "min_cluster_size": MIN_CLUSTER_SIZE,
         "cluster_selection_epsilon": CLUSTER_SELECTION_EPSILON,
@@ -85,7 +108,7 @@ def main():
     dataset_signature = DATASET_FILE
 
     cached_run_id = db_manager.get_cached_run(
-        clustering_params, dataset_signature) if USE_CACHE else None
+        clustering_params, dataset_signature) if USE_CLUSTERING_CACHE else None
     clustered_points = []
     used_k = 0
     llm_labels = {}
@@ -197,7 +220,7 @@ def main():
                         llm_labels[i] = f"Cluster {i}"
 
                 # Save to Cache
-                if USE_CACHE:
+                if USE_CLUSTERING_CACHE:
                     print("Saving results to cache...")
                     db_manager.save_run(
                         clustering_params,

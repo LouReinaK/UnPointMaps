@@ -1,5 +1,8 @@
 # remove non-significant words from text data
 import pandas as pd
+import os
+import logging
+from multiprocessing import Pool
 try:
     from nltk.corpus import stopwords
     from nltk.tokenize import word_tokenize
@@ -15,15 +18,33 @@ except ImportError:
 from collections import Counter
 from functools import lru_cache
 
+# Configure logger
+logger = logging.getLogger(__name__)
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+
 # Lazy database manager instance
 _DB_MANAGER = None
+_CACHE_ENABLED = True
+
+def set_cache_enabled(enabled):
+    """Globally enable or disable database caching for word removal."""
+    global _CACHE_ENABLED
+    _CACHE_ENABLED = enabled
 
 def get_db_manager():
     """Returns the database manager instance, initializing it if necessary."""
     global _DB_MANAGER
+    if not _CACHE_ENABLED:
+        return None
     if _DB_MANAGER is None:
         try:
             from ..database.manager import DatabaseManager
+            # Use the default path "unpointmaps_cache.db" which is the main project DB
             _DB_MANAGER = DatabaseManager()
         except Exception:
             return None
@@ -126,6 +147,8 @@ def clean_texts_batched(texts):
     if not unique_texts:
         return original_texts
 
+    logger.info(f"Cleaning batch of {len(original_texts)} texts ({len(unique_texts)} unique non-empty)")
+
     db = get_db_manager()
     cached_results = {}
     
@@ -133,24 +156,51 @@ def clean_texts_batched(texts):
     if db:
         try:
             cached_results = db.get_cleaned_text_batch(unique_texts)
-        except Exception:
+            if cached_results:
+                logger.info(f"Cache hit: {len(cached_results)}/{len(unique_texts)} texts found in database")
+        except Exception as e:
+            logger.debug(f"DB cache read error: {e}")
             cached_results = {}
     
     # 2. Process what's missing
     to_process = [t for t in unique_texts if t not in cached_results]
     new_results = {}
     
-    for t in to_process:
-        cleaned = _remove_nonsignificant_words_multilang_internal(t)
-        new_results[t] = cleaned
-        cached_results[t] = cleaned
+    if to_process:
+        # Use multiprocessing for large batches to speed up CPU-bound cleaning/detection
+        if len(to_process) > 50:
+            logger.info(f"Processing {len(to_process)} new texts using multiprocessing...")
+            # Limit workers to avoid excessive overhead or memory usage
+            num_workers = os.cpu_count() or 1
+            try:
+                with Pool(processes=num_workers) as pool:
+                    clean_results_list = pool.map(_remove_nonsignificant_words_multilang_internal, to_process)
+                for t, cleaned in zip(to_process, clean_results_list):
+                    new_results[t] = cleaned
+                    cached_results[t] = cleaned
+                logger.info("Multiprocessing batch complete.")
+            except Exception as e:
+                logger.warning(f"Multiprocessing failed, falling back to sequential: {e}")
+                # Fallback to sequential if multiprocessing fails
+                for t in to_process:
+                    cleaned = _remove_nonsignificant_words_multilang_internal(t)
+                    new_results[t] = cleaned
+                    cached_results[t] = cleaned
+        else:
+            if len(to_process) > 0:
+                logger.debug(f"Processing {len(to_process)} texts sequentially")
+            for t in to_process:
+                cleaned = _remove_nonsignificant_words_multilang_internal(t)
+                new_results[t] = cleaned
+                cached_results[t] = cleaned
         
     # 3. Save new results to DB
     if db and new_results:
         try:
             db.save_cleaned_text_batch(new_results)
-        except Exception:
-            pass
+            logger.debug(f"Saved {len(new_results)} new cleaned texts to database")
+        except Exception as e:
+            logger.debug(f"DB cache write error: {e}")
             
     # Reconstruct the list in original order
     return [cached_results.get(t, t) if t else "" for t in original_texts]
@@ -167,8 +217,20 @@ def process_text_columns(df, text_columns):
 
 def langues_detectees(df, n=5000):
     """Affiche les langues détectées dans le dataset des 5000 premières lignes et les affiche en pourcentage"""
-    all_texts = df['title'].tolist() + df['tags'].tolist()
-    detected_languages = [detect_language(text) for text in all_texts[:n]]
+    all_texts = [str(t) for t in (df['title'].tolist() + df['tags'].tolist())[:n] if t and not pd.isna(t)]
+    
+    if len(all_texts) > 100:
+        logger.info(f"Detecting languages for {len(all_texts)} items using multiprocessing...")
+        num_workers = min(os.cpu_count() or 1, 8)
+        try:
+            with Pool(processes=num_workers) as pool:
+                detected_languages = pool.map(detect_language, all_texts)
+        except Exception as e:
+            logger.warning(f"Multiprocessing for language detection failed: {e}")
+            detected_languages = [detect_language(text) for text in all_texts]
+    else:
+        detected_languages = [detect_language(text) for text in all_texts]
+        
     language_counts = Counter(detected_languages)
     total = sum(language_counts.values())
     print("Langues détectées dans le dataset:")

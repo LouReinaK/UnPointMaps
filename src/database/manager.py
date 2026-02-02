@@ -1,7 +1,10 @@
 import sqlite3
 import json
 import hashlib
+import os
+import io
 import numpy as np
+import pandas as pd
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple, Any
 
@@ -132,6 +135,17 @@ class DatabaseManager:
             CREATE TABLE IF NOT EXISTS text_cleaning_cache (
                 raw_text TEXT PRIMARY KEY,
                 cleaned_text TEXT,
+                created_at TEXT
+            )
+        ''')
+
+        # Table for processed dataset cache
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS processed_data_cache (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_file TEXT,
+                source_mtime REAL,
+                data_json TEXT,
                 created_at TEXT
             )
         ''')
@@ -594,3 +608,49 @@ class DatabaseManager:
             pass
         finally:
             conn.close()
+
+    def get_processed_data_cache(self, source_file: str) -> Optional[pd.DataFrame]:
+        """Retrieve processed dataset from cache if source file hasn't changed."""
+        try:
+            if not os.path.exists(source_file):
+                return None
+            
+            mtime = os.path.getmtime(source_file)
+            
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.execute(
+                "SELECT data_json FROM processed_data_cache WHERE source_file = ? AND source_mtime = ? ORDER BY id DESC LIMIT 1",
+                (source_file, mtime)
+            )
+            row = cursor.fetchone()
+            conn.close()
+            
+            if row:
+                df = pd.read_json(io.StringIO(row[0]), orient='records')
+                # Ensure date is converted back to datetime
+                if 'date' in df.columns:
+                    df['date'] = pd.to_datetime(df['date'])
+                return df
+        except Exception:
+            pass
+        return None
+
+    def save_processed_data_cache(self, source_file: str, df: pd.DataFrame):
+        """Save processed dataset to cache with source file metadata."""
+        try:
+            if not os.path.exists(source_file):
+                return
+            
+            mtime = os.path.getmtime(source_file)
+            data_json = df.to_json(orient='records', date_format='iso')
+            timestamp = datetime.now().isoformat()
+            
+            conn = sqlite3.connect(self.db_path)
+            conn.execute(
+                "INSERT INTO processed_data_cache (source_file, source_mtime, data_json, created_at) VALUES (?, ?, ?, ?)",
+                (source_file, mtime, data_json, timestamp)
+            )
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass
