@@ -155,6 +155,7 @@ def main():
                 # Note: Ensure .env file exists with OPENAI_API_KEY
                 config_manager = ConfigManager()
                 labeling_service = LLMLabelingService(config_manager)
+                labeling_service.set_cache_enabled(USE_LLM_CACHE)
 
                 print(
                     f"Labelling {used_k} clusters using {config_manager.get_model()}...")

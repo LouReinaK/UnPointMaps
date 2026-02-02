@@ -718,6 +718,14 @@ class LLMLabelingService:
 
         # Initialize Database Manager for Caching
         self.db_manager = DatabaseManager()
+        self.cache_enabled = True
+
+    def set_cache_enabled(self, enabled: bool):
+        """
+        Enable or disable all levels of caching for this service.
+        """
+        self.cache_enabled = enabled
+        logger.info(f"LLM Labeling cache enabled: {enabled}")
 
         # Initialize Embedding Service for Representative Selection
         self.embedding_service = EmbeddingService.get_instance()
@@ -880,11 +888,12 @@ Your Summary:"""
 
             # --- Direct Cluster Point ID Cache Check ---
             cluster_point_id = validated_metadata.cluster_id
-            cached_data = self.db_manager.get_cached_cluster_point_label(cluster_point_id)
-            if cached_data:
-                logger.info(
-                    f"Using direct cache label for cluster {validated_metadata.cluster_id}")
-                return LabelResult(**cached_data)
+            if self.cache_enabled:
+                cached_data = self.db_manager.get_cached_cluster_point_label(cluster_point_id)
+                if cached_data:
+                    logger.info(
+                        f"Using direct cache label for cluster {validated_metadata.cluster_id}")
+                    return LabelResult(**cached_data)
 
             # Step 2: Construct optimized prompt
             logger.info(
@@ -897,13 +906,14 @@ Your Summary:"""
             # --- Traditional Cache Check ---
             cache_key = self._generate_cache_key(
                 prompt, self.config['model'], temperature)
-            cached_data = self.db_manager.get_cached_llm_label(cache_key)
-            if cached_data:
-                logger.info(
-                    f"Using traditional cache label for cluster {validated_metadata.cluster_id}")
-                # Also save to direct cache for future use
-                self.db_manager.save_cached_cluster_point_label(cluster_point_id, cached_data)
-                return LabelResult(**cached_data)
+            if self.cache_enabled:
+                cached_data = self.db_manager.get_cached_llm_label(cache_key)
+                if cached_data:
+                    logger.info(
+                        f"Using traditional cache label for cluster {validated_metadata.cluster_id}")
+                    # Also save to direct cache for future use
+                    self.db_manager.save_cached_cluster_point_label(cluster_point_id, cached_data)
+                    return LabelResult(**cached_data)
 
             # Step 3: Call LLM API
             logger.info(
@@ -952,8 +962,9 @@ Your Summary:"""
             }
 
             # Cache the result in both caches
-            self.db_manager.save_cached_llm_label(cache_key, result_data)
-            self.db_manager.save_cached_cluster_point_label(cluster_point_id, result_data)
+            if self.cache_enabled:
+                self.db_manager.save_cached_llm_label(cache_key, result_data)
+                self.db_manager.save_cached_cluster_point_label(cluster_point_id, result_data)
 
             # Create result object
             result = LabelResult(

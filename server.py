@@ -74,6 +74,9 @@ MAX_KEYWORDS = 5
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("UnPointMaps_Server")
 
+# Apply cache settings to libraries
+set_cache_enabled(USE_TEXT_CLEANING_CACHE)
+
 # Global State
 class AppState:
     def __init__(self):
@@ -107,6 +110,7 @@ def labelling_worker():
     try:
         config_manager = ConfigManager()
         labeling_service = LLMLabelingService(config_manager)
+        labeling_service.set_cache_enabled(USE_LLM_CACHE)
         logger.info(f"LLM Service initialized using {config_manager.get_model()}")
     except Exception as e:
         logger.error(f"Failed to initialize LLM Service: {e}")
