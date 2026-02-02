@@ -720,22 +720,21 @@ class LLMLabelingService:
         self.db_manager = DatabaseManager()
         self.cache_enabled = True
 
+        # Initialize Embedding Service for Representative Selection
+        self.embedding_service = EmbeddingService.get_instance()
+        # Ensure model is checked/loaded, though server.py likely did it.
+        # It's a singleton, so load_model() is idempotent if logic is correct
+        if hasattr(
+                self.embedding_service,
+                'model') and self.embedding_service.model is None:
+            self.embedding_service.load_model()
+
     def set_cache_enabled(self, enabled: bool):
         """
         Enable or disable all levels of caching for this service.
         """
         self.cache_enabled = enabled
         logger.info(f"LLM Labeling cache enabled: {enabled}")
-
-        # Initialize Embedding Service for Representative Selection
-        self.embedding_service = EmbeddingService.get_instance()
-        # Ensure model is checked/loaded, though server.py likely did it.
-        # It's a singleton, so load_model() is idempotent if logic is correct
-        # (I checked it is safe)
-        if hasattr(
-                self.embedding_service,
-                'model') and self.embedding_service.model is None:
-            self.embedding_service.load_model()
 
     def validate_and_prepare_input(
             self, cluster_metadata: dict) -> ClusterMetadata:
@@ -824,25 +823,33 @@ class LLMLabelingService:
         if task_description is None:
             task_description = (
                 "You are an expert in image analysis and geographic labeling. "
-                "Summarize the provided representative sentences to generate a concise label.")
+                "Your task is to provide a highly concise and informative name for a cluster of photos based on their descriptions.")
 
         # Select representative sentences using centroid strategy
         selected_texts = self._select_representative_sentences(
             metadata.text_metadata, top_k=20)
-        combined_text = '\n'.join(selected_texts)
+        combined_text = '\n'.join(f"- {text}" for text in selected_texts)
 
         # Construct prompt with clear instructions
         prompt = f"""{task_description}
-Representative Sentences (selected by centroid proximity):
+
+Representative Sentences from the cluster:
 {combined_text}
 
 Instructions:
-1. These sentences are the most representative of the cluster's content.
-2. Summarize these sentences into ONE concise sentence capturing the average meaning.
-3. Length constraint: Keep it under 15 words.
-4. IMPORTANT: Output ONLY the summary sentence. Do not include quotes or explanations.
+1. Summarize the content into a single concise noun phrase or name (e.g., "Eiffel Tower Paris").
+2. DO NOT use filler phrases like "Images of", "A cluster of", "Photos showing", "This cluster features", or "The city of".
+3. DO NOT include meta-descriptions about the photos themselves (e.g., "various locations", "taken in France"). Focus on the core subject.
+4. If multiple topics are present, prioritize the most dominant one or use a concise combination.
+5. Max length: 15 words.
+6. IMPORTANT: Output ONLY the label itself. Do not include quotes, punctuation at the end, or explanations.
 
-Your Summary:"""
+Example Output format:
+- Input labels about birds in a park -> Park Birds & Nature
+- Input labels about a protest -> Street Protest for Climate
+- Input labels about a specific landmark -> Notre Dame Cathedral Architecture
+
+Your Label:"""
 
         return prompt
 
@@ -888,6 +895,8 @@ Your Summary:"""
 
             # --- Direct Cluster Point ID Cache Check ---
             cluster_point_id = validated_metadata.cluster_id
+            
+            # Reset logic: only read if True
             if self.cache_enabled:
                 cached_data = self.db_manager.get_cached_cluster_point_label(cluster_point_id)
                 if cached_data:
@@ -906,6 +915,8 @@ Your Summary:"""
             # --- Traditional Cache Check ---
             cache_key = self._generate_cache_key(
                 prompt, self.config['model'], temperature)
+            
+            # Reset logic: only read if True
             if self.cache_enabled:
                 cached_data = self.db_manager.get_cached_llm_label(cache_key)
                 if cached_data:
@@ -962,9 +973,11 @@ Your Summary:"""
             }
 
             # Cache the result in both caches
-            if self.cache_enabled:
-                self.db_manager.save_cached_llm_label(cache_key, result_data)
-                self.db_manager.save_cached_cluster_point_label(cluster_point_id, result_data)
+            # Always save to handle "reset" when self.cache_enabled is False
+            self.db_manager.save_cached_llm_label(cache_key, result_data)
+            self.db_manager.save_cached_cluster_point_label(cluster_point_id, result_data)
+            if not self.cache_enabled:
+                logger.info(f"LLM cache overwritten for cluster {validated_metadata.cluster_id} (reset mode).")
 
             # Create result object
             result = LabelResult(
@@ -1068,7 +1081,51 @@ Your Summary:"""
             elif processed.startswith("'") and processed.endswith("'"):
                 processed = processed[1:-1]
 
-            # Remove any trailing punctuation that might be excessive
+            # Preliminary strip to handle punctuation before filler removal
+            processed = processed.strip(" .,;:!?\"'")
+
+            # Remove common filler phrases (case-insensitive)
+            fillers = [
+                "images show", "photos show", "this cluster shows",
+                "images depict", "photos depict", "this cluster depicts",
+                "images of", "photos of", "a cluster of",
+                "representative sentences show", "the summary is",
+                "summary:", "label:", "this is a", "is featured in these photos",
+                "various locations including", "images from", "photos from"
+            ]
+
+            lower_processed = processed.lower()
+            changed = True
+            while changed:
+                changed = False
+                for filler in fillers:
+                    if lower_processed.startswith(filler):
+                        processed = processed[len(filler):].strip()
+                        lower_processed = processed.lower()
+                        changed = True
+                    if lower_processed.endswith(filler):
+                        processed = processed[:-len(filler)].strip()
+                        lower_processed = processed.lower()
+                        changed = True
+                
+                # Strip again within loop to handle nested fillers/punctuation
+                if changed:
+                    processed = processed.strip(" .,;:!?\"'")
+                    lower_processed = processed.lower()
+
+            # Additional check for generic "The city of " at start
+            if processed.lower().startswith("the city of "):
+                processed = processed[12:].strip()
+
+            # Remove leading articles for conciseness in labels
+            lower_p = processed.lower()
+            if lower_p.startswith("a ") or lower_p.startswith("an ") or lower_p.startswith("the "):
+                parts = processed.split()
+                if len(parts) > 1:
+                    processed = " ".join(parts[1:])
+
+            # Final capitalization and cleanup
+            processed = processed.strip(" .,;:!?\"'")
             while processed and processed[-1] in '.,;:!?' and len(
                     processed) > 1:
                 processed = processed[:-1]

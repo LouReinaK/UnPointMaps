@@ -1,3 +1,4 @@
+import traceback
 from typing import List, Dict, Optional, Set, Any
 from contextlib import asynccontextmanager
 import threading
@@ -47,10 +48,10 @@ DB_PATH = "unpointmaps_cache.db"
 DATASET_FILE = "flickr_data2.csv"
 
 # --- Cache Settings ---
-USE_DATA_CACHE = True
-USE_CLUSTERING_CACHE = True
-USE_TEXT_CLEANING_CACHE = True
-USE_LLM_CACHE = True
+USE_DATA_CACHE = False
+USE_CLUSTERING_CACHE = False
+USE_TEXT_CLEANING_CACHE = False
+USE_LLM_CACHE = False
 
 # --- Clustering Parameters ---
 MIN_CLUSTER_SIZE = 3
@@ -271,7 +272,8 @@ def labelling_worker():
                 label = None
                 cached_data = None
                 
-                if app_state.db_manager:
+                # Cache Reset logic: only read if True
+                if app_state.db_manager and USE_LLM_CACHE:
                     cached_data = app_state.db_manager.get_cached_llm_label(cache_key)
                 
                 if cached_data and "label" in cached_data:
@@ -302,6 +304,8 @@ def labelling_worker():
                         # Cache the result
                         if app_state.db_manager:
                             app_state.db_manager.save_cached_llm_label(cache_key, {"label": label})
+                            if not USE_LLM_CACHE:
+                                logger.info(f"LLM cache overwritten for cluster {cluster_id} (reset mode).")
                             
                     except Exception as e:
                         logger.error(f"Error labelling {cluster_id}: {e}")
@@ -329,6 +333,7 @@ def labelling_worker():
             continue
         except Exception as e:
             logger.error(f"Worker Exception: {e}")
+            traceback.print_exc()
 
 # Hull Computation Worker
 def hull_worker():
@@ -475,16 +480,28 @@ async def lifespan(app: FastAPI):
 
     # Load Data (with Cache)
     logger.info("Loading dataset...")
-    cached_df = app_state.db_manager.get_processed_data_cache(DATASET_FILE) if USE_DATA_CACHE else None
+    # Cache Reset logic: Only load from cache if USE_DATA_CACHE is True.
+    # If False, we ignore existing cache to force a refresh and overwrite.
+    cached_df = None
+    if USE_DATA_CACHE:
+        cached_df = app_state.db_manager.get_processed_data_cache(DATASET_FILE)
+
     if cached_df is not None:
         logger.info(f"Loaded processed dataset from cache ({len(cached_df)} records)")
         app_state.df = cached_df
     else:
-        logger.info("Cache miss or file changed, processing dataset from scratch...")
+        if not USE_DATA_CACHE:
+            logger.info("Data cache is False: Forcing refresh of processed data.")
+        else:
+            logger.info("Cache miss or file changed, processing dataset from scratch...")
+            
         app_state.df = convert_to_dict_filtered()
-        if USE_DATA_CACHE:
+        # Always save/overwrite cache (this handles the "reset" when it was False)
+        if app_state.db_manager:
             app_state.db_manager.save_processed_data_cache(DATASET_FILE, app_state.df)
-        logger.info(f"Dataset processed (Cache: {'Saved' if USE_DATA_CACHE else 'Disabled'}): {len(app_state.df)} records.")
+            if not USE_DATA_CACHE:
+                logger.info("Processed data cache refreshed and overwritten.")
+        logger.info(f"Dataset processed (Cache: {'Saved' if USE_DATA_CACHE else 'Overwritten'}): {len(app_state.df)} records.")
     
     # Detect Events
     logger.info("Detecting events...")
@@ -647,31 +664,35 @@ def background_clustering_task(df: pd.DataFrame, params: dict, total_start: floa
     cache_check_start = time.time()
     try:
         dataset_hash = hashlib.sha256(np.array(pd.util.hash_pandas_object(df, index=True)).tobytes()).hexdigest()
+        
+        # Cache Reset logic: Only load from cache if USE_CLUSTERING_CACHE is True
+        cached_labels = None
         if app_state.db_manager and USE_CLUSTERING_CACHE:
             cached_labels = app_state.db_manager.get_cached_labels(params, dataset_hash)
-            if cached_labels is not None:
-                cache_check_time = time.time() - cache_check_start
-                logger.info(f"Cache check took {cache_check_time:.4f}s - Found cached clustering results. Skipping computation.")
-                n_clusters = len(set(cached_labels)) - (1 if -1 in cached_labels else 0)  # Exclude noise
-                if loop is not None:
-                    asyncio.run_coroutine_threadsafe(
-                        broadcast_progress(f"Clustering complete (Cached). Found {n_clusters} clusters."),
-                        loop
-                    )
-                result_clusters = update_app_state_with_clustering_results(df, cached_labels, enqueue=False)
-                if loop is not None:
-                    asyncio.run_coroutine_threadsafe(
-                        broadcast_clusters(result_clusters),
-                        loop
-                    )
-                
-                # Now enqueue for labelling
-                for cluster in result_clusters:
-                    app_state.labelling_queue.put((10, cluster['id'], 0))
+            
+        if cached_labels is not None:
+            cache_check_time = time.time() - cache_check_start
+            logger.info(f"Cache check took {cache_check_time:.4f}s - Found cached clustering results. Skipping computation.")
+            n_clusters = len(set(cached_labels)) - (1 if -1 in cached_labels else 0)  # Exclude noise
+            if loop is not None:
+                asyncio.run_coroutine_threadsafe(
+                    broadcast_progress(f"Clustering complete (Cached). Found {n_clusters} clusters."),
+                    loop
+                )
+            result_clusters = update_app_state_with_clustering_results(df, cached_labels, enqueue=False)
+            if loop is not None:
+                asyncio.run_coroutine_threadsafe(
+                    broadcast_clusters(result_clusters),
+                    loop
+                )
+            
+            # Now enqueue for labelling
+            for cluster in result_clusters:
+                app_state.labelling_queue.put((10, cluster['id'], 0))
 
-                total_time = time.time() - total_start
-                logger.info(f"Total clustering time (cached): {total_time:.4f}s")
-                return
+            total_time = time.time() - total_start
+            logger.info(f"Total clustering time (cached): {total_time:.4f}s")
+            return
 
     except Exception as e:
         logger.error(f"Error checking cache: {e}")
@@ -814,10 +835,12 @@ def background_clustering_task(df: pd.DataFrame, params: dict, total_start: floa
             final_clusters_data, n_clusters, final_labels = data
             logger.info(f"Background clustering complete: {n_clusters} clusters.")
             
-            # Save to cache
-            if app_state.db_manager and USE_CLUSTERING_CACHE:
+            # Save to cache - Always save to handle "reset" when USE_CLUSTERING_CACHE is False
+            if app_state.db_manager:
                 try:
                     app_state.db_manager.save_cached_labels(params, dataset_hash, final_labels)
+                    if not USE_CLUSTERING_CACHE:
+                        logger.info("Clustering cache overwritten (reset mode).")
                 except Exception as e:
                     logger.error(f"Error saving to cache: {e}")
 

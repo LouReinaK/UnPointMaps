@@ -386,7 +386,7 @@ class TestLLMLabelingService:
             # Verify prompt contains expected elements
             assert "paris eiffel tower" in prompt
             assert "eiffel tower night" in prompt
-            assert "Your Summary:" in prompt
+            assert "Your Label:" in prompt
 
         finally:
             os.unlink(env_path)
@@ -702,6 +702,45 @@ class TestSampleImageClusterMetadata:
             assert isinstance(result, LabelResult)
             assert result.label == 'Eiffel Tower Paris Landmark'
             assert result.processing_info['model_used'] == 'mistralai/mistral-7b-instruct'
+
+        finally:
+            os.unlink(env_path)
+
+
+class TestPostProcessing:
+    """Test post-processing of LLM responses"""
+
+    def test_filler_removal(self):
+        """Test removal of common filler phrases from LLM labels"""
+        import tempfile
+        # Create temporary .env file for service init
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.env', delete=False) as f:
+            f.write("OPENAI_API_KEY=sk-valid_api_key_12345678901234567890\n")
+            env_path = f.name
+
+        try:
+            config_manager = ConfigManager(env_path)
+            service = LLMLabelingService(config_manager)
+            metadata = ClusterMetadata(
+                cluster_id="test", image_ids=[], text_metadata=["test"], cluster_size=1
+            )
+
+            # Test simple filler removal
+            assert service._process_llm_response("Images show Eiffel Tower", metadata) == "Eiffel Tower"
+            assert service._process_llm_response("Photos of Notre Dame", metadata) == "Notre Dame"
+            assert service._process_llm_response("This cluster depicts a fountain", metadata) == "Fountain"
+            assert service._process_llm_response("the city of Lyon streets", metadata) == "Lyon streets"
+
+            # Test more complex cases from user samples
+            assert service._process_llm_response(
+                "The city of Lyon landscape",
+                metadata
+            ) == "Lyon landscape"
+
+            assert service._process_llm_response(
+                "Lyon cityscape is featured in these photos",
+                metadata
+            ) == "Lyon cityscape"
 
         finally:
             os.unlink(env_path)
