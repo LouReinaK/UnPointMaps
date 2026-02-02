@@ -1,5 +1,5 @@
 import numpy as np
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Optional
 from scipy.spatial.distance import cdist
 from scipy import interpolate
 
@@ -181,3 +181,127 @@ def evaluate_path_cost(path: List[List[float]], centroids: np.ndarray, weights: 
     
     cost = np.sum(weights * distances)
     return cost
+
+def compute_polynomial_tram_line(clusters: List[Dict], degree: int = 5, n_points: int = 100, 
+                                  max_length: Optional[float] = None) -> List[List[float]]:
+    """
+    Compute a tram line path using polynomial regression that minimizes distance to cluster centroids.
+    
+    The function extracts all points from clusters, finds the principal direction,
+    and fits a polynomial curve through the data to create a smooth tram line path.
+    
+    Args:
+        clusters: List of cluster dicts with 'points' (list of [lat, lon] or list of polygons)
+        degree: Degree of the polynomial (1=linear, 2=quadratic, 3=cubic, etc.)
+        n_points: Number of points to generate along the polynomial curve
+        max_length: Optional maximum length constraint (in degrees)
+    
+    Returns:
+        path: List of [lat, lon] points defining the polynomial tram line
+    """
+    if not clusters:
+        return []
+    
+    # Extract all points from all clusters
+    all_points = []
+    all_weights = []
+    
+    for cluster in clusters:
+        points_list = cluster['points']
+        if not points_list or not isinstance(points_list, list):
+            continue
+        
+        # Flatten if it's a list of polygons
+        cluster_points = []
+        for item in points_list:
+            if isinstance(item, list) and len(item) > 0:
+                if isinstance(item[0], (list, tuple)) and len(item[0]) >= 2:
+                    # It's a polygon: list of [lat, lon]
+                    cluster_points.extend(item)
+                elif isinstance(item[0], (int, float)):
+                    # It's a point: [lat, lon]
+                    cluster_points.append(item)
+        
+        # Filter valid points
+        for point in cluster_points:
+            if isinstance(point, (list, tuple)) and len(point) >= 2:
+                try:
+                    lat, lon = float(point[0]), float(point[1])
+                    all_points.append([lat, lon])
+                    # Weight each point by cluster size
+                    all_weights.append(cluster.get('size', 1))
+                except (ValueError, TypeError):
+                    continue
+    
+    if len(all_points) == 0:
+        return []
+    
+    points = np.array(all_points)
+    weights = np.array(all_weights)
+    print(f"[DEBUG] Points shape: {points.shape}, weights shape: {weights.shape}")
+    
+    # If only one point, return a small segment
+    if len(points) == 1:
+        center = points[0]
+        offset = 0.001
+        return [
+            [center[0] - offset, center[1] - offset],
+            center.tolist(),
+            [center[0] + offset, center[1] + offset]
+        ]
+    
+    # Compute weighted center
+    weighted_center = np.average(points, axis=0, weights=weights)
+    print(f"[DEBUG] Weighted center: {weighted_center}")
+    
+    # Center the points
+    centered_points = points - weighted_center
+    
+    # Find principal direction using weighted PCA
+    cov_matrix = np.cov(centered_points.T, aweights=weights)
+    eigenvalues, eigenvectors = np.linalg.eigh(cov_matrix)
+    principal_direction = eigenvectors[:, -1]  # eigenvector of largest eigenvalue
+    
+    # Project all points onto the principal direction to get parameter t
+    # t represents the position along the principal axis
+    t_values = np.dot(centered_points, principal_direction)
+    
+    # Sort points by t for proper polynomial fitting
+    sort_indices = np.argsort(t_values)
+    t_sorted = t_values[sort_indices]
+    points_sorted = points[sort_indices]
+    weights_sorted = weights[sort_indices]
+    
+    # Fit polynomial: lat = poly(t) and lon = poly(t)
+    # Using weighted polynomial regression
+    lat_coeffs = np.polyfit(t_sorted, points_sorted[:, 0], degree, w=np.sqrt(weights_sorted))
+    lon_coeffs = np.polyfit(t_sorted, points_sorted[:, 1], degree, w=np.sqrt(weights_sorted))
+    
+    # Create polynomial functions
+    lat_poly = np.poly1d(lat_coeffs)
+    lon_poly = np.poly1d(lon_coeffs)
+    
+    # Generate points along the polynomial curve
+    t_min, t_max = t_sorted[0], t_sorted[-1]
+    
+    # Apply max_length constraint if specified
+    if max_length is not None:
+        # Estimate current length and scale if necessary
+        t_range = t_max - t_min
+        estimated_length = t_range * np.linalg.norm(principal_direction)
+        if estimated_length > max_length:
+            scale_factor = max_length / estimated_length
+            t_center = (t_min + t_max) / 2
+            t_min = t_center - (t_center - t_min) * scale_factor
+            t_max = t_center + (t_max - t_center) * scale_factor
+    
+    t_eval = np.linspace(t_min, t_max, n_points)
+    
+    # Evaluate polynomials
+    lat_values = lat_poly(t_eval)
+    lon_values = lon_poly(t_eval)
+    
+    # Combine into path
+    path = [[float(lat), float(lon)] for lat, lon in zip(lat_values, lon_values)]
+    
+    return path
