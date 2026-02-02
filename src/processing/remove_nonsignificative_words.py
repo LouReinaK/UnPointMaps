@@ -15,6 +15,7 @@ try:
 except ImportError:
     detect = None
     DetectorFactory = None
+import re
 from collections import Counter
 from functools import lru_cache
 
@@ -274,6 +275,80 @@ def remove_word_lyon(df):
     """Supprime le mot 'lyon' d'un dataset donné (insensible à la casse)"""
     df = df.map(lambda x: x.replace('lyon', '').replace('Lyon', '') if isinstance(x, str) else x)
     return df
+
+
+def get_most_frequent_non_stopwords(df, top_n=7, min_freq=5):
+    """Retourne les mots les plus fréquents dans title+tags qui ne sont pas des stopwords.
+    Méthode optimisée : utilise l'union des stopwords disponibles et un tokeniseur regex léger
+    pour éviter la détection de langue coûteuse sur chaque texte.
+    """
+    texts = []
+    if 'title' in df.columns:
+        texts += df['title'].dropna().astype(str).tolist()
+    if 'tags' in df.columns:
+        texts += df['tags'].dropna().astype(str).tolist()
+
+    if not texts:
+        return []
+
+    # Union de tous les stopwords connus (fr/en/...) pour un nettoyage global rapide
+    stop_union = set()
+    for s in STOPWORDS_DICT.values():
+        stop_union.update(s)
+    # NOTE: n'ajouter aucun token projet-spécifique ici (ex: 'lyon') afin que 'lyon' puisse
+    # être détecté parmi les mots fréquents et éventuellement supprimé.
+
+    words = []
+    token_pattern = re.compile(r"\b[\w'-]+\b", flags=re.UNICODE)
+    for t in texts:
+        if not isinstance(t, str) or not t:
+            continue
+        # lower once
+        t_lower = t.lower()
+        for m in token_pattern.findall(t_lower):
+            # skip pure numbers and very short tokens
+            if m.isdigit() or len(m) < 2:
+                continue
+            if m in stop_union:
+                continue
+            words.append(m)
+
+    if not words:
+        return []
+
+    counts = Counter(words)
+    frequent = [w for w, c in counts.most_common(top_n * 2) if c >= min_freq]
+    return frequent[:top_n]
+
+
+def remove_frequent_words_from_df(df, words_to_remove):
+    """Supprime mots donnés (liste) des colonnes title et tags du dataframe et renvoie une copie."""
+    df = df.copy()
+
+    def _remove_from_text(text):
+        if not isinstance(text, str):
+            return text
+        # remplace mot complet, insensible à la casse
+        pattern = r"\b(" + "|".join(re.escape(w) for w in words_to_remove) + r")\b"
+        return re.sub(pattern, "", text, flags=re.IGNORECASE).strip()
+
+    if 'title' in df.columns:
+        df['title'] = df['title'].astype(str).apply(_remove_from_text)
+    if 'tags' in df.columns:
+        df['tags'] = df['tags'].astype(str).apply(_remove_from_text)
+
+    return df
+
+
+def remove_common_words_pipeline(df, top_n=10, min_freq=10):
+    """Pipeline : détecte mots fréquents non-stopwords et les supprime.
+    Retourne (df_cleaned, words_removed)
+    """
+    frequent = get_most_frequent_non_stopwords(df, top_n=top_n, min_freq=min_freq)
+    if not frequent:
+        return df.copy(), []
+    df_clean = remove_frequent_words_from_df(df, frequent)
+    return df_clean, frequent
 
 
 

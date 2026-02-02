@@ -1,6 +1,6 @@
 import pandas as pd
 from datetime import datetime
-from .remove_nonsignificative_words import clean_df_words
+from .remove_nonsignificative_words import clean_df_words, remove_common_words_pipeline
 
 
 def filter_dataset(df):
@@ -65,7 +65,12 @@ def filter_dataset(df):
     print(
         f"Après suppression des doublons géographiques: {len_initial-len(df)} lignes filtrées.")
 
-    df = clean_df_words(df)
+    # Remove frequent non-stopwords (e.g. 'lyon') using pipeline
+    # Remove only the top 6 most frequent non-stopwords to limit removals
+    df, removed_words = remove_common_words_pipeline(df, top_n=7, min_freq=50)
+    if removed_words:
+        print(f"Mots fréquents supprimés: {', '.join(removed_words)}")
+
     print("==== Filtrage terminé ====\n")
     return df, df_grouped
 
