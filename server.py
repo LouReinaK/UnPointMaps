@@ -37,7 +37,7 @@ from src.processing.remove_nonsignificative_words import clean_text_list, set_ca
 from src.processing.TFIDF import get_top_keywords
 from src.utils.hull_logic import compute_cluster_hulls
 from src.database.manager import DatabaseManager
-from src.processing.tram_line import compute_tram_line
+from src.processing.tram_line import compute_tram_line, compute_polynomial_tram_line
 
 
 # --- Configuration ---
@@ -1079,16 +1079,23 @@ async def get_cluster_images(cluster_id: str):
 @app.post("/api/tram_line")
 async def compute_tram_line_endpoint(params: dict):
     """
-    Compute optimal tram line path.
+    Compute optimal tram line path using polynomial regression.
     
     Params:
     {
-        "max_length": 0.01  # in degrees (approx 1km)
+        "max_length": 0.01,  # in degrees (approx 1km)
+        "degree": 2          # polynomial degree (1=linear, 2=quadratic, 3=cubic, etc.)
     }
     """
     max_length = params.get("max_length", 0.01)
     if max_length <= 0:
         return {"error": "max_length must be positive"}
+    
+    degree = params.get("degree", 2)
+    if not isinstance(degree, int) or degree < 1:
+        return {"error": "degree must be a positive integer"}
+    # if degree > 10:
+    #     return {"error": "degree must be 10 or less"}
     
     # Get current clusters
     clusters = []
@@ -1102,7 +1109,7 @@ async def compute_tram_line_endpoint(params: dict):
     if not clusters:
         return {"path": [], "error": "No clusters available"}
     
-    path = compute_tram_line(clusters, max_length)
+    path = compute_polynomial_tram_line(clusters, degree, 100, None)
     
     return {"path": path}
 

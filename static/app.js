@@ -253,15 +253,11 @@ document.addEventListener('DOMContentLoaded', () => {
     btn.disabled = true;
     btn.innerText = 'Computing...';
     
-    try {
-      const maxLengthKm = parseFloat(document.getElementById('tram-length').value);
-      // Convert km to degrees (approximate: 1 degree lat ~ 111 km)
-      const maxLengthDeg = maxLengthKm / 111;
-      
+    try {      
       const resp = await fetch('/api/tram_line', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ max_length: maxLengthDeg })
+        body: JSON.stringify({ max_length: 5, degree: parseInt(document.getElementById('polynomial-degree').value) })
       });
       const result = await resp.json();
       
@@ -285,8 +281,6 @@ document.addEventListener('DOMContentLoaded', () => {
         
         // Fit map to show the tram line
         // map.fitBounds(tramLineLayer.getBounds()); // Manual readjustment now required via button
-        
-        alert('Tram line computed and displayed!');
       } else {
         alert('No tram line could be computed.');
       }
