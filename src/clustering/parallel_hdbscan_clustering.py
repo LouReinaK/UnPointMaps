@@ -8,11 +8,8 @@ import hdbscan
 def _process_cluster_subset(args: Tuple[np.ndarray,
                                         np.ndarray,
                                         Dict[str,
-                                             Any],
-                                        int]) -> Tuple[List[Tuple[np.ndarray,
-                                                                  np.ndarray]],
-                                                       List[Tuple[np.ndarray,
-                                                                  np.ndarray]]]:
+                                             Any]]) -> List[Tuple[np.ndarray,
+                                                                 np.ndarray]]:
     """
     Helper function to process a single subset of points with HDBSCAN.
     Executed in parallel workers.
@@ -22,20 +19,14 @@ def _process_cluster_subset(args: Tuple[np.ndarray,
             - current_points: numpy array of points to cluster
             - original_indices: numpy array of original indices corresponding to current_points
             - hdbscan_params: Dictionary of parameters for HDBSCAN
-            - max_cluster_size: Maximum allowed size for a cluster
 
     Returns:
-        final_clusters: List of (points, indices) for accepted clusters
-        retry_clusters: List of (points, indices) for clusters that need splitting
+        clusters: List of (points, indices) for all discovered clusters
     """
-    current_points, original_indices, hdbscan_params, max_cluster_size = args
+    current_points, original_indices, hdbscan_params = args
 
     if len(current_points) < hdbscan_params.get('min_cluster_size', 5):
-        # Too small to be a cluster (though the parent was a cluster, treating fragments as noise if HDBSCAN fails is one way,
-        # or just keeping it if it can't be split. Current logic implies we try to split.
-        # If input is small, HDBSCAN might label all as noise or one cluster.
-        # Let's proceed with HDBSCAN attempt.)
-        pass
+        return []
 
     try:
         clusterer = hdbscan.HDBSCAN(
@@ -43,48 +34,39 @@ def _process_cluster_subset(args: Tuple[np.ndarray,
             min_samples=hdbscan_params.get('min_samples', None),
             cluster_selection_epsilon=hdbscan_params.get(
                 'cluster_selection_epsilon', 0.5),
-            metric='euclidean',
-            algorithm='boruvka_kdtree',
+            metric='haversine',
+            # algorithm='boruvka_kdtree',
             core_dist_n_jobs=1  # Disable inner parallelism to avoid oversubscription
         ).fit(current_points)
 
         labels = clusterer.labels_
-        # Optimization: np.unique is faster
         unique_labels = np.unique(labels)
 
         if -1 in unique_labels:
             unique_labels = unique_labels[unique_labels != -1]
 
-        final_clusters = []
-        retry_clusters = []
+        clusters = []
 
         for label in unique_labels:
             cluster_mask = labels == label
             cluster_points = current_points[cluster_mask]
             cluster_original_indices = original_indices[cluster_mask]
 
-            cluster_size = len(cluster_points)
+            clusters.append((cluster_points, cluster_original_indices))
 
-            if cluster_size > max_cluster_size:
-                retry_clusters.append(
-                    (cluster_points, cluster_original_indices))
-            else:
-                final_clusters.append(
-                    (cluster_points, cluster_original_indices))
-
-        return final_clusters, retry_clusters
+        return clusters
 
     except Exception as e:
         print(f"Error in parallel worker: {e}")
-        return [], []
+        return []
 
 
 def parallel_hdbscan_iterative_generator(
     dataset: Any,
-    min_cluster_size: int = 10,
+    min_cluster_size: int = 3,
     min_samples: Optional[int] = None,
-    cluster_selection_epsilon: float = 0.5,
-    max_cluster_size: int = 5000,
+    cluster_selection_epsilon: float = 0.0005,
+    max_std_dev: float = 30.0,
     max_workers: Optional[int] = None
 ):
     """
@@ -145,7 +127,7 @@ def parallel_hdbscan_iterative_generator(
 
             # Prepare arguments for parallel execution
             tasks = [
-                (pts, idxs, hdbscan_params, max_cluster_size)
+                (pts, idxs, hdbscan_params)
                 for pts, idxs in points_to_process
                 if len(pts) > 0
             ]
@@ -159,19 +141,37 @@ def parallel_hdbscan_iterative_generator(
             else:
                 results = list(executor.map(_process_cluster_subset, tasks))
 
-            # Aggregate results
-            for finals, retries in results:
-                # Add retries to next iteration queue
-                new_points_to_process.extend(retries)
+            # Aggregate all found clusters first
+            temp_clusters = []
+            for clusters_in_subset in results:
+                temp_clusters.extend(clusters_in_subset)
 
-                # Save final clusters
-                for pts, idxs in finals:
-                    final_clusters_data.append(pts.tolist())
-                    # For intermediate labels, we can't easily update global labels array iteratively
-                    # without more complex state, but we do it at the end.
-                    # However, we DO need to track them for the final result.
-                    final_labels[idxs] = next_cluster_id
-                    next_cluster_id += 1
+            # Compute statistics on all found clusters in this iteration
+            if temp_clusters:
+                sizes = [len(c[0]) for c in temp_clusters]
+                if len(sizes) > 1:
+                    std_dev = np.std(sizes)
+                    mean_size = np.mean(sizes)
+                    print(f"    Cluster sizes std dev: {std_dev:.2f}, mean: {mean_size:.2f}")
+
+                    for cluster_points, cluster_original_indices in temp_clusters:
+                        cluster_size = len(cluster_points)
+                        if std_dev > max_std_dev and cluster_size > mean_size:
+                            print(f"    Re-processing large cluster with {cluster_size} points")
+                            new_points_to_process.append((cluster_points, cluster_original_indices))
+                        else:
+                            print(f"    Accepted cluster with {cluster_size} points (ID: {next_cluster_id})")
+                            final_clusters_data.append(cluster_points.tolist())
+                            final_labels[cluster_original_indices] = next_cluster_id
+                            next_cluster_id += 1
+                else:
+                    # Only one cluster, accept it
+                    for cluster_points, cluster_original_indices in temp_clusters:
+                        cluster_size = len(cluster_points)
+                        print(f"    Accepted cluster with {cluster_size} points (ID: {next_cluster_id})")
+                        final_clusters_data.append(cluster_points.tolist())
+                        final_labels[cluster_original_indices] = next_cluster_id
+                        next_cluster_id += 1
 
             points_to_process = new_points_to_process
 
@@ -181,10 +181,10 @@ def parallel_hdbscan_iterative_generator(
 
 def parallel_hdbscan_clustering_iterative(
     dataset: Any,
-    min_cluster_size: int = 10,
+    min_cluster_size: int = 3,
     min_samples: Optional[int] = None,
-    cluster_selection_epsilon: float = 0.5,
-    max_cluster_size: int = 5000,
+    cluster_selection_epsilon: float = 0.0005,
+    max_std_dev: float = 30.0,
     max_workers: Optional[int] = None
 ) -> Tuple[List[List[List[float]]], int, np.ndarray]:
     """
@@ -196,7 +196,7 @@ def parallel_hdbscan_clustering_iterative(
         min_cluster_size,
         min_samples,
         cluster_selection_epsilon,
-        max_cluster_size,
+        max_std_dev,
         max_workers)
 
     result = None

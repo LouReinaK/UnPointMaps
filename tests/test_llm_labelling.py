@@ -448,7 +448,8 @@ class TestLLMLabelingService:
 
             # Setup Mock DB Manager instance
             mock_db_instance = MockDatabaseManager.return_value
-            mock_db_instance.get_cached_llm_label.return_value = None  # Cache miss first
+            mock_db_instance.get_cached_llm_label.return_value = None  # Traditional cache miss first
+            mock_db_instance.get_cached_cluster_point_label.return_value = None  # Direct cache miss first
 
             service = LLMLabelingService(config_manager)
 
@@ -614,6 +615,7 @@ class TestCompleteWorkflow:
         # Create temporary .env file with invalid API key
         with tempfile.NamedTemporaryFile(mode='w', suffix='.env', delete=False) as f:
             f.write("OPENAI_API_KEY=invalid\n")
+            f.write("LLM_PROVIDER=openrouter\n")
             env_path = f.name
 
         try:

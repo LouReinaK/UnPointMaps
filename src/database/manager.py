@@ -118,6 +118,15 @@ class DatabaseManager:
             )
         ''')
 
+        # Table for direct cluster point ID to label cache
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS cluster_point_label_cache (
+                cluster_point_id TEXT PRIMARY KEY,
+                label_data TEXT,
+                created_at TEXT
+            )
+        ''')
+
         conn.commit()
         conn.close()
 
@@ -173,6 +182,35 @@ class DatabaseManager:
             conn.execute(
                 "INSERT OR REPLACE INTO llm_cache (cache_key, label_data, created_at) VALUES (?, ?, ?)",
                 (key, json.dumps(data), datetime.now().isoformat())
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            pass
+    
+    def get_cached_cluster_point_label(self, cluster_point_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieve cached label for a specific cluster point ID."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.execute(
+                "SELECT label_data FROM cluster_point_label_cache WHERE cluster_point_id = ?", (cluster_point_id,)
+            )
+            row = cursor.fetchone()
+            conn.close()
+            
+            if row:
+                return json.loads(row[0])
+            return None
+        except Exception as e:
+            return None
+    
+    def save_cached_cluster_point_label(self, cluster_point_id: str, data: Dict[str, Any]):
+        """Save label for a specific cluster point ID to cache."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            conn.execute(
+                "INSERT OR REPLACE INTO cluster_point_label_cache (cluster_point_id, label_data, created_at) VALUES (?, ?, ?)",
+                (cluster_point_id, json.dumps(data), datetime.now().isoformat())
             )
             conn.commit()
             conn.close()

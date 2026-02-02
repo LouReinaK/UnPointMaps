@@ -184,10 +184,17 @@ class ConfigManager:
                     base_url = "http://localhost:11434/v1"
 
             # Validation
-            if provider == 'openrouter':
+            is_local = 'localhost' in base_url or '127.0.0.1' in base_url or api_key == 'ollama'
+            
+            if not is_local:
                 if not api_key or not api_key.strip():
                     raise ConfigurationError(
-                        "API key not found. Please set OPENAI_API_KEY for OpenRouter.")
+                        "API key not found. Please set OPENAI_API_KEY for the configured LLM provider.")
+                
+                # Validate API key format
+                if not self.validate_api_key(api_key.strip()):
+                    raise ConfigurationError(
+                        "Invalid API key format. API keys should start with 'sk-' and be at least 20 characters long.")
 
             # Ensure API key is string
             if not api_key:
@@ -863,6 +870,14 @@ Your Summary:"""
             validated_metadata = self.validate_and_prepare_input(
                 cluster_metadata)
 
+            # --- Direct Cluster Point ID Cache Check ---
+            cluster_point_id = validated_metadata.cluster_id
+            cached_data = self.db_manager.get_cached_cluster_point_label(cluster_point_id)
+            if cached_data:
+                logger.info(
+                    f"Using direct cache label for cluster {validated_metadata.cluster_id}")
+                return LabelResult(**cached_data)
+
             # Step 2: Construct optimized prompt
             logger.info(
                 f"Constructing LLM prompt for cluster {validated_metadata.cluster_id}")
@@ -871,13 +886,15 @@ Your Summary:"""
             # Log first 200 chars
             logger.info(f"Generated prompt: {prompt[:200]}...")
 
-            # --- Caching Check ---
+            # --- Traditional Cache Check ---
             cache_key = self._generate_cache_key(
                 prompt, self.config['model'], temperature)
             cached_data = self.db_manager.get_cached_llm_label(cache_key)
             if cached_data:
                 logger.info(
-                    f"Using cached label for cluster {validated_metadata.cluster_id}")
+                    f"Using traditional cache label for cluster {validated_metadata.cluster_id}")
+                # Also save to direct cache for future use
+                self.db_manager.save_cached_cluster_point_label(cluster_point_id, cached_data)
                 return LabelResult(**cached_data)
 
             # Step 3: Call LLM API
@@ -926,8 +943,9 @@ Your Summary:"""
                 }
             }
 
-            # Cache the result
+            # Cache the result in both caches
             self.db_manager.save_cached_llm_label(cache_key, result_data)
+            self.db_manager.save_cached_cluster_point_label(cluster_point_id, result_data)
 
             # Create result object
             result = LabelResult(

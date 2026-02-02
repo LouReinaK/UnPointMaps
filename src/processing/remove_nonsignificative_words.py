@@ -114,8 +114,9 @@ def clean_df_words(df, threshold=0.5):
         df['title'].dropna().astype(str).tolist()
         + df['tags'].dropna().astype(str).tolist()
     )
-    texts=remove_nonsignificant_words_multilang(texts)
-    frequent_words = get_top_keywords(texts, top_n=3)
+    # Clean each text individually
+    cleaned_texts = [remove_nonsignificant_words_multilang(t) for t in texts]
+    frequent_words = get_top_keywords(cleaned_texts, top_n=3)
     # Supprimer les mots fréquents du dataset
     df = df.map(lambda x: ' '.join(
         word for word in str(x).split() if word.lower() not in frequent_words) if isinstance(x, str) else x)
@@ -123,10 +124,9 @@ def clean_df_words(df, threshold=0.5):
 
 
 def remove_word_lyon(df):
-    """Supprime le mot 'lyon' d'un dataset donné"""
-    df = df.map(lambda x: x.replace('lyon', '') if isinstance(x, str) else x)
+    """Supprime le mot 'lyon' d'un dataset donné (insensible à la casse)"""
+    df = df.map(lambda x: x.replace('lyon', '').replace('Lyon', '') if isinstance(x, str) else x)
     return df
-    """Supprime le mot 'lyon' d'un dataset donné"""
 
 
 

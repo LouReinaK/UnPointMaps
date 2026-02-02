@@ -12,7 +12,7 @@ def _hdbscan_worker(
     min_cluster_size: int,
     min_samples: Optional[int],
     cluster_selection_epsilon: float,
-    max_cluster_size: int,
+    max_std_dev: float,
     output_queue: multiprocessing.Queue
 ):
     try:
@@ -40,6 +40,8 @@ def _hdbscan_worker(
 
             new_points_to_process = []
 
+            temp_clusters = []
+
             for current_points, original_indices in points_to_process:
                 if len(current_points) == 0:
                     continue
@@ -47,14 +49,11 @@ def _hdbscan_worker(
                 print(f"  Clustering {len(current_points)} points...")
 
                 # Apply HDBSCAN to current subset
-                # Optimization: Explicitly use boruvka_kdtree for speed with
-                # Euclidean metric
                 clusterer = hdbscan.HDBSCAN(
                     min_cluster_size=min_cluster_size,
                     min_samples=min_samples,
                     cluster_selection_epsilon=cluster_selection_epsilon,
-                    metric='euclidean',
-                    algorithm='boruvka_kdtree',
+                    metric='haversine',
                     core_dist_n_jobs=-1  # Use all cores for this step
                 ).fit(current_points)
 
@@ -66,37 +65,46 @@ def _hdbscan_worker(
                 if -1 in unique_labels:
                     unique_labels = unique_labels[unique_labels != -1]
 
-                # Process each cluster
+                # Collect all clusters
                 for label in unique_labels:
                     cluster_mask = labels == label
                     cluster_points = current_points[cluster_mask]
                     cluster_original_indices = original_indices[cluster_mask]
 
-                    cluster_size = len(cluster_points)
-
-                    if cluster_size > max_cluster_size:
-                        # This cluster is too large - add it back for
-                        # re-processing
-                        print(
-                            f"    Found large cluster with {cluster_size} points (> {max_cluster_size}), will split...")
-                        new_points_to_process.append(
-                            (cluster_points, cluster_original_indices))
-                    else:
-                        # This cluster is acceptable - save it
-                        print(
-                            f"    Accepted cluster with {cluster_size} points (ID: {next_cluster_id})")
-                        # Store both points and indices: (points_list,
-                        # indices_list)
-                        final_clusters.append(
-                            (cluster_points.tolist(), cluster_original_indices.tolist()))
-                        final_labels[cluster_original_indices] = next_cluster_id
-                        next_cluster_id += 1
+                    temp_clusters.append((cluster_points, cluster_original_indices))
 
                 # Noise points remain as noise in final_labels
                 noise_mask = labels == -1
                 if np.any(noise_mask):
                     noise_count = np.sum(noise_mask)
                     print(f"    Found {noise_count} noise points")
+
+            # Compute statistics on all found clusters
+            if temp_clusters:
+                sizes = [len(c[0]) for c in temp_clusters]
+                if len(sizes) > 1:
+                    std_dev = np.std(sizes)
+                    mean_size = np.mean(sizes)
+                    print(f"    Cluster sizes std dev: {std_dev:.2f}, mean: {mean_size:.2f}")
+
+                    for cluster_points, cluster_original_indices in temp_clusters:
+                        cluster_size = len(cluster_points)
+                        if std_dev > max_std_dev and cluster_size > mean_size:
+                            print(f"    Re-processing large cluster with {cluster_size} points")
+                            new_points_to_process.append((cluster_points, cluster_original_indices))
+                        else:
+                            print(f"    Accepted cluster with {cluster_size} points (ID: {next_cluster_id})")
+                            final_clusters.append((cluster_points.tolist(), cluster_original_indices.tolist()))
+                            final_labels[cluster_original_indices] = next_cluster_id
+                            next_cluster_id += 1
+                else:
+                    # Only one cluster, accept it
+                    for cluster_points, cluster_original_indices in temp_clusters:
+                        cluster_size = len(cluster_points)
+                        print(f"    Accepted cluster with {cluster_size} points (ID: {next_cluster_id})")
+                        final_clusters.append((cluster_points.tolist(), cluster_original_indices.tolist()))
+                        final_labels[cluster_original_indices] = next_cluster_id
+                        next_cluster_id += 1
 
             # Update points to process for next iteration
             points_to_process = new_points_to_process
@@ -117,10 +125,10 @@ def _hdbscan_worker(
 
 def hdbscan_iterative_generator(
     dataset: Any,
-    min_cluster_size: int = 10,
+    min_cluster_size: int = 3,
     min_samples: Optional[int] = None,
-    cluster_selection_epsilon: float = 0.5,
-    max_cluster_size: int = 5000
+    cluster_selection_epsilon: float = 0.0005,
+    max_std_dev: float = 30.0
 ):
     """
     Generator for iterative HDBSCAN clustering.
@@ -154,7 +162,7 @@ def hdbscan_iterative_generator(
             min_cluster_size,
             min_samples,
             cluster_selection_epsilon,
-            max_cluster_size,
+            max_std_dev,
             output_queue
         )
     )
@@ -188,13 +196,14 @@ def hdbscan_iterative_generator(
 
 def hdbscan_clustering_iterative(
     dataset: Any,
-    min_cluster_size: int = 10,
+    min_cluster_size: int = 3,
     min_samples: Optional[int] = None,
-    cluster_selection_epsilon: float = 0.5,
-    max_cluster_size: int = 5000
+    cluster_selection_epsilon: float = 0.0005,
+    max_std_dev: float = 30.0
 ) -> Tuple[List[List[List[float]]], int, np.ndarray]:
     """
-    Performs iterative HDBSCAN clustering, splitting large clusters until all are below max_cluster_size.
+    Performs iterative HDBSCAN clustering, splitting large clusters until the standard deviation
+    of cluster sizes falls below max_std_dev.
     Wrapper around generator.
     """
     gen = hdbscan_iterative_generator(
@@ -202,7 +211,7 @@ def hdbscan_clustering_iterative(
         min_cluster_size,
         min_samples,
         cluster_selection_epsilon,
-        max_cluster_size)
+        max_std_dev)
     result = None
     for status, data in gen:
         if status == "final":

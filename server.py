@@ -628,9 +628,9 @@ def background_clustering_task(df: pd.DataFrame, params: dict, total_start: floa
     cache_check_time = time.time() - cache_check_start
     logger.info(f"Cache check took {cache_check_time:.4f}s - No cache found, proceeding with computation.")
 
-    min_cluster_size = 10
-    cluster_selection_epsilon = 1/1000.0
-    max_cluster_size = 1000
+    min_cluster_size = 3
+    cluster_selection_epsilon = 5 / 10000.0
+    max_std_dev = 30.0
     
     algo = params.get("algorithm", "hdbscan")
     
@@ -639,14 +639,14 @@ def background_clustering_task(df: pd.DataFrame, params: dict, total_start: floa
             df,
             min_cluster_size=min_cluster_size,
             cluster_selection_epsilon=cluster_selection_epsilon,
-            max_cluster_size=max_cluster_size
+            max_std_dev=max_std_dev
         )
     else: # Normal iterative hdbscan
         gen = hdbscan_iterative_generator(
             df,
             min_cluster_size=min_cluster_size,
             cluster_selection_epsilon=cluster_selection_epsilon,
-            max_cluster_size=max_cluster_size
+            max_std_dev=max_std_dev
         )
     
     # Run generator in a separate thread and use a queue to decouple processing

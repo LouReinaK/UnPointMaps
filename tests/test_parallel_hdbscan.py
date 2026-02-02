@@ -23,14 +23,14 @@ class TestParallelHDBSCAN(unittest.TestCase):
         self.params = {
             'min_cluster_size': 10,
             'cluster_selection_epsilon': 0.2,
-            'max_cluster_size': 300  # Should force splitting of the 666-point blobs
+            'max_std_dev': 50.0  # Should force splitting to achieve uniform sizes
         }
 
     def test_sequential_vs_parallel_logic(self):
         print("\n--- Testing Sequential Execution ---")
         start_time = time.time()
         clusters_seq, n_clusters_seq, labels_seq = hdbscan_clustering_iterative(
-            self.dataset, **self.params)
+            self.dataset, max_std_dev=50.0, **{k: v for k, v in self.params.items() if k != 'max_std_dev'})
         seq_time = time.time() - start_time
         print(
             f"Sequential took {seq_time:.4f}s. Found {n_clusters_seq} clusters.")
@@ -38,7 +38,7 @@ class TestParallelHDBSCAN(unittest.TestCase):
         print("\n--- Testing Parallel Execution ---")
         start_time = time.time()
         clusters_par, n_clusters_par, labels_par = parallel_hdbscan_clustering_iterative(
-            self.dataset, **self.params)
+            self.dataset, max_std_dev=50.0, **{k: v for k, v in self.params.items() if k != 'max_std_dev'})
         par_time = time.time() - start_time
         print(
             f"Parallel took {par_time:.4f}s. Found {n_clusters_par} clusters.")

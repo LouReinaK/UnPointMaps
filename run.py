@@ -18,22 +18,40 @@ from src.cli_menu import CLIMenu
 USE_CACHE = True
 DB_PATH = "unpointmaps_cache.db"
 USE_PARALLEL_CLUSTERING = True  # Enable parallel processing by default
+DATASET_FILE = "flickr_data2.csv"
+
+# Clustering Parameters
+MIN_CLUSTER_SIZE = 3
+CLUSTER_SELECTION_EPSILON = 5 / 10000.0  # Approx 0.5 meters in degrees
+MAX_STD_DEV = 30.0  # Maximum allowed standard deviation of cluster sizes
+LIMIT = -1  # Limiting dataset size (-1 for no limit)
+
+# Hull Generation Parameters
+# Alpha parameter controls hull tightness:
+# - Smaller values (e.g., 0.1-0.5) = tighter, more concave hulls
+# - Larger values (e.g., 1.0-5.0) = looser hulls, closer to convex hull
+# - None = auto-compute based on 'average' density of EACH cluster (Scaling)
+ALPHA_VALUE = 1 / 1000  # Set to None to enable auto-scaling
+# Only used if ALPHA_VALUE is None. 0.95 = Keep 95% of triangles (pretty loose).
+ALPHA_QUANTILE = 0.9
+
+# LLM Labeling Parameters
+MAX_LABELING_WORKERS = 5
 
 TEST_CLUSTERS = False  # Set to True to only test clustering and exit
 TEST_HULLS = False    # Set to True to preview hulls on matplotlib and exit
 ADD_POINTS = False    # Set to True to add individual points to the map
 # Set to True to automatically open the generated map in a web browser
-AUTO_OPEN_BROWSER = True
+AUTO_OPEN_BROWSER = False
 
 
 def main():
     print("--- Starting UnPointMaps ---")
     print("Loading and filtering dataset...")
     df = convert_to_dict_filtered()
-    limit = -1
-    if limit != -1:
-        print(f"Limiting dataset to first {limit} points for performance...")
-        df = df.head(limit)
+    if LIMIT != -1:
+        print(f"Limiting dataset to first {LIMIT} points for performance...")
+        df = df.head(LIMIT)
 
     # === CLI INTERFACE ===
     # Invoke menu to filter dataset
@@ -45,15 +63,10 @@ def main():
         sys.exit(0)
     # =====================
 
-    # HDBSCAN settings
-    min_cluster_size = 10
-    cluster_selection_epsilon = 1 / 1000.0  # Approx 1 meter in degrees
-    max_cluster_size = 1000  # Maximum allowed cluster size
-
     print("Starting iterative clustering with HDBSCAN...")
-    print(f"  min_cluster_size={min_cluster_size}")
-    print(f"  cluster_selection_epsilon={cluster_selection_epsilon}")
-    print(f"  max_cluster_size={max_cluster_size}")
+    print(f"  min_cluster_size={MIN_CLUSTER_SIZE}")
+    print(f"  cluster_selection_epsilon={CLUSTER_SELECTION_EPSILON}")
+    print(f"  max_std_dev={MAX_STD_DEV}")
     if USE_PARALLEL_CLUSTERING:
         print(
             f"  Parallel execution: Enabled (Workers: {multiprocessing.cpu_count()})")
@@ -62,13 +75,13 @@ def main():
     # Prepare Cache and Parameters
     db_manager = DatabaseManager(DB_PATH)
     clustering_params = {
-        "min_cluster_size": min_cluster_size,
-        "cluster_selection_epsilon": cluster_selection_epsilon,
-        "max_cluster_size": max_cluster_size,
-        "limit": limit
+        "min_cluster_size": MIN_CLUSTER_SIZE,
+        "cluster_selection_epsilon": CLUSTER_SELECTION_EPSILON,
+        "max_std_dev": MAX_STD_DEV,
+        "limit": LIMIT
     }
     # Simple signature for dataset
-    dataset_signature = "flickr_data2.csv"
+    dataset_signature = DATASET_FILE
 
     cached_run_id = db_manager.get_cached_run(
         clustering_params, dataset_signature) if USE_CACHE else None
@@ -90,16 +103,16 @@ def main():
         if USE_PARALLEL_CLUSTERING:
             clustered_points, used_k, labels = parallel_hdbscan_clustering_iterative(
                 df,
-                min_cluster_size=min_cluster_size,
-                cluster_selection_epsilon=cluster_selection_epsilon,
-                max_cluster_size=max_cluster_size
+                min_cluster_size=MIN_CLUSTER_SIZE,
+                cluster_selection_epsilon=CLUSTER_SELECTION_EPSILON,
+                max_std_dev=MAX_STD_DEV
             )
         else:
             clustered_points, used_k, labels = hdbscan_clustering_iterative(
                 df,
-                min_cluster_size=min_cluster_size,
-                cluster_selection_epsilon=cluster_selection_epsilon,
-                max_cluster_size=max_cluster_size
+                min_cluster_size=MIN_CLUSTER_SIZE,
+                cluster_selection_epsilon=CLUSTER_SELECTION_EPSILON,
+                max_std_dev=MAX_STD_DEV
             )
         print(f"Clustering complete. Found {used_k} clusters.")
 
@@ -167,9 +180,8 @@ def main():
             # Process in batches
             # Use a reasonable number of workers (e.g., 5 or 10) to allow concurrent processing
             # while the rate limiter imposes the speed limit.
-            max_workers = 5
             results = labeling_service.process_batch(
-                clusters_to_process, max_workers)
+                clusters_to_process, MAX_LABELING_WORKERS)
             llm_labels.update(results)
 
             # Fill in missing labels
@@ -327,19 +339,10 @@ def main():
                 vis.draw_point(row)
 
     print("Computing cluster hulls...")
-    # Alpha parameter controls hull tightness:
-    # - Smaller values (e.g., 0.1-0.5) = tighter, more concave hulls
-    # - Larger values (e.g., 1.0-5.0) = looser hulls, closer to convex hull
-    # - None = auto-compute based on 'average' density of EACH cluster (Scaling)
-    alpha_value = 1 / 1000  # Set to None to enable auto-scaling
-    # Only used if alpha_value is None. 0.95 = Keep 95% of triangles (pretty
-    # loose).
-    alpha_quantile = 0.9
-
     hulls = compute_cluster_hulls(
         clustered_points,
-        alpha=alpha_value,
-        auto_alpha_quantile=alpha_quantile)
+        alpha=ALPHA_VALUE,
+        auto_alpha_quantile=ALPHA_QUANTILE)
 
     print(f"Adding {len(hulls)} hulls to map...")
     for i, hull in enumerate(hulls):
@@ -348,6 +351,25 @@ def main():
 
         for poly_points in hull:
             vis.draw_cluster(poly_points, popup=label_text, tooltip=label_text)
+
+    print("Generating output map 'output_map.html'...")
+    # Compute optimized extremes from dataframe for bounds if possible
+    try:
+        min_lat = df["latitude"].min()
+        max_lat = df["latitude"].max()
+        min_lon = df["longitude"].min()
+        max_lon = df["longitude"].max()
+        bounds = [[min_lat, min_lon], [max_lat, max_lon]]
+    except Exception:
+        bounds = None
+
+    vis.create_map("output_map.html", bounds=bounds)
+
+    if AUTO_OPEN_BROWSER:
+        print("Opening map in web browser...")
+        webbrowser.open("output_map.html")
+
+    print("--- Done ---")
 
     print("Generating output map 'output_map.html'...")
     # Compute optimized extremes from dataframe for bounds if possible
