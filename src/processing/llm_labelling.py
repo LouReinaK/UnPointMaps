@@ -1,7 +1,15 @@
 # LLM Labeling System - Environment Configuration and Core Functionality
 # Based on the architecture specified in plans/llm_labelling_architecture.md
 
-from openai import OpenAI, OpenAIError
+try:
+    from openai import OpenAI, OpenAIError
+except ImportError:
+    class OpenAI:
+        def __init__(self, *args, **kwargs):
+            raise ImportError("The 'openai' library is required for LLMLabelingService. Please install it with 'pip install openai'.")
+    class OpenAIError(Exception):
+        pass
+
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 import os
 import logging

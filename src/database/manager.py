@@ -127,6 +127,15 @@ class DatabaseManager:
             )
         ''')
 
+        # Table for text cleaning cache
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS text_cleaning_cache (
+                raw_text TEXT PRIMARY KEY,
+                cleaned_text TEXT,
+                created_at TEXT
+            )
+        ''')
+
         conn.commit()
         conn.close()
 
@@ -187,7 +196,49 @@ class DatabaseManager:
             conn.close()
         except Exception as e:
             pass
-    
+
+    def get_cleaned_text_batch(self, texts: List[str]) -> Dict[str, str]:
+        """Retrieve cleaned text for a batch of strings."""
+        if not texts:
+            return {}
+        try:
+            conn = sqlite3.connect(self.db_path)
+            # SQLite has a limit on parameters, so we might need to chunk if texts is huge
+            # but for 5000 it's usually fine if we don't exceed the limit (default 999)
+            # Let's chunk it for safety
+            results = {}
+            chunk_size = 900
+            for i in range(0, len(texts), chunk_size):
+                chunk = texts[i:i + chunk_size]
+                placeholders = ",".join(["?"] * len(chunk))
+                cursor = conn.execute(
+                    f"SELECT raw_text, cleaned_text FROM text_cleaning_cache WHERE raw_text IN ({placeholders})",
+                    chunk
+                )
+                for row in cursor.fetchall():
+                    results[row[0]] = row[1]
+            conn.close()
+            return results
+        except Exception as e:
+            return {}
+
+    def save_cleaned_text_batch(self, mapping: Dict[str, str]):
+        """Save a batch of cleaned text mappings."""
+        if not mapping:
+            return
+        try:
+            conn = sqlite3.connect(self.db_path)
+            timestamp = datetime.now().isoformat()
+            data = [(raw, cleaned, timestamp) for raw, cleaned in mapping.items()]
+            conn.executemany(
+                "INSERT OR REPLACE INTO text_cleaning_cache (raw_text, cleaned_text, created_at) VALUES (?, ?, ?)",
+                data
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            pass
+
     def get_cached_cluster_point_label(self, cluster_point_id: str) -> Optional[Dict[str, Any]]:
         """Retrieve cached label for a specific cluster point ID."""
         try:

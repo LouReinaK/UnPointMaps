@@ -1,4 +1,7 @@
-import folium
+try:
+    import folium
+except ImportError:
+    folium = None
 import pandas as pd
 
 # Trinome 3
@@ -15,6 +18,9 @@ class Visualisation:
         Adds a polygon (cluster hull) to the map.
         points: list of [lat, lon]
         """
+        if folium is None:
+            return
+
         kwargs = {
             "color": "blue",
             "fill": True,
@@ -27,6 +33,9 @@ class Visualisation:
         self.clusters.append(folium.Polygon(locations=points, **kwargs))
 
     def draw_point(self, point, **kwargs):
+        if folium is None:
+            return
+
         if isinstance(point, (pd.Series, dict)):
             latitude = point['latitude']
             longitude = point['longitude']
@@ -54,6 +63,10 @@ class Visualisation:
         )
 
     def create_map(self, output_file="map.html", bounds=None):
+        if folium is None:
+            print("Error: 'folium' library is missing. Cannot generate map. Please install it with 'pip install folium'.")
+            return
+
         # Default center/zoom
         zoom_start = 12
 

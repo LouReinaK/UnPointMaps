@@ -1,6 +1,9 @@
 from typing import List, Tuple, Any
 import numpy as np
-from sklearn.cluster import DBSCAN
+try:
+    from sklearn.cluster import DBSCAN
+except ImportError:
+    DBSCAN = None
 
 
 def dbscan_clustering(dataset: Any,
@@ -10,17 +13,9 @@ def dbscan_clustering(dataset: Any,
                                                      np.ndarray]:
     """
     Performs DBSCAN clustering on the dataset.
-
-    Args:
-        dataset: pandas DataFrame (with 'latitude', 'longitude') or numpy array of points.
-        eps: The maximum distance between two samples for one to be considered as in the neighborhood of the other.
-        min_samples: The number of samples (or total weight) in a neighborhood for a point to be considered as a core point.
-
-    Returns:
-        clusters: A list of clusters, where each cluster is a list of points [lat, lon]. Noise points (label -1) are excluded.
-        n_clusters: The number of clusters found (excluding noise).
-        labels: Array of cluster labels (-1 is noise).
     """
+    if DBSCAN is None:
+        raise ImportError("The 'scikit-learn' library is required for DBSCAN. Please install it with 'pip install scikit-learn'.")
 
     # Data preparation
     if hasattr(dataset, 'iloc'):  # pandas DataFrame

@@ -54,8 +54,13 @@ class CLIMenu:
 
             elif choice == '5':
                 # Temporal Analysis
-                print("\nRunning Temporal Analysis on current dataset...")
-                analyze_timestamps(df)
+                from src.utils.dependency_utils import HAS_MATPLOTLIB
+                if HAS_MATPLOTLIB:
+                    print("\nRunning Temporal Analysis on current dataset...")
+                    analyze_timestamps(df)
+                else:
+                    print("\n[!] Error: 'matplotlib' is required for temporal analysis plots.")
+                    print("    Please install it to enable this feature.")
                 input("\nPress Enter to return to menu...")
 
             else:

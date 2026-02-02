@@ -2,7 +2,10 @@ from typing import List, Tuple, Optional, Dict, Any
 import concurrent.futures
 import multiprocessing
 import numpy as np
-import hdbscan
+try:
+    import hdbscan
+except ImportError:
+    hdbscan = None
 
 
 def _process_cluster_subset(args: Tuple[np.ndarray,
@@ -23,6 +26,9 @@ def _process_cluster_subset(args: Tuple[np.ndarray,
     Returns:
         clusters: List of (points, indices) for all discovered clusters
     """
+    if hdbscan is None:
+        raise ImportError("hdbscan library is not installed.")
+
     current_points, original_indices, hdbscan_params = args
 
     if len(current_points) < hdbscan_params.get('min_cluster_size', 5):

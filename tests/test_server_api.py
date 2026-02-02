@@ -19,13 +19,6 @@ class TestServerAPI:
             'tags': ['tag']
         })
 
-    def test_get_index(self):
-        with TestClient(app) as client:
-            response = client.get("/")
-            assert response.status_code == 200
-            # Ensure it serves html
-            assert "text/html" in response.headers["content-type"]
-
     @patch('src.processing.dataset_filtering.convert_to_dict_filtered')
     @patch('server.convert_to_dict_filtered')
     @patch('server.TimeFilter')

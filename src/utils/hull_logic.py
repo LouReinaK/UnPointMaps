@@ -1,11 +1,19 @@
 import numpy as np
 import pandas as pd
 from typing import List, Set, Dict
-from shapely.geometry import MultiPolygon, Polygon, GeometryCollection
-from shapely.ops import unary_union
-from scipy.spatial import ConvexHull, Delaunay
-from scipy.sparse import csr_matrix
-from scipy.sparse.csgraph import minimum_spanning_tree
+try:
+    from shapely.geometry import MultiPolygon, Polygon, GeometryCollection
+    from shapely.ops import unary_union
+except ImportError:
+    MultiPolygon = Polygon = GeometryCollection = unary_union = None
+
+try:
+    from scipy.spatial import ConvexHull, Delaunay
+    from scipy.sparse import csr_matrix
+    from scipy.sparse.csgraph import minimum_spanning_tree
+except ImportError:
+    ConvexHull = Delaunay = csr_matrix = minimum_spanning_tree = None
+
 import multiprocessing
 import concurrent.futures
 
@@ -486,6 +494,9 @@ def compute_cluster_hulls(
     """
     Computes alpha shapes for a list of clusters.
     """
+    if Polygon is None or ConvexHull is None:
+        return [[] for _ in clusters]
+
     clean_clusters = []
     for cluster in clusters:
         coords = []

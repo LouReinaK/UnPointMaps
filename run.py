@@ -13,6 +13,7 @@ from src.processing.llm_labelling import ConfigManager, LLMLabelingService
 from src.database.manager import DatabaseManager
 from src.processing.remove_nonsignificative_words import clean_text_list
 from src.cli_menu import CLIMenu
+from src.utils.dependency_utils import HAS_HDBSCAN, HAS_OPENAI, HAS_FOLIUM, HAS_MATPLOTLIB
 
 # Configuration
 USE_CACHE = True
@@ -100,6 +101,11 @@ def main():
         import numpy as np
         labels = np.full(len(df), -1)
     else:
+        if not HAS_HDBSCAN:
+            print("\n[!] Error: 'hdbscan' library is required for HDBSCAN clustering.")
+            print("    Please install it with: pip install hdbscan")
+            sys.exit(1)
+
         if USE_PARALLEL_CLUSTERING:
             clustered_points, used_k, labels = parallel_hdbscan_clustering_iterative(
                 df,
@@ -119,92 +125,102 @@ def main():
     # LLM Labeling Integration
     if not cached_run_id:  # Only run if not cached
         llm_labels = {}
-        try:
-            print("\n--- Starting LLM Labeling ---")
-            # Initialize ConfigManager and Service
-            # Note: Ensure .env file exists with OPENAI_API_KEY
-            config_manager = ConfigManager()
-            labeling_service = LLMLabelingService(config_manager)
+        if HAS_OPENAI:
+            try:
+                print("\n--- Starting LLM Labeling ---")
+                # Initialize ConfigManager and Service
+                # Note: Ensure .env file exists with OPENAI_API_KEY
+                config_manager = ConfigManager()
+                labeling_service = LLMLabelingService(config_manager)
 
-            print(
-                f"Labelling {used_k} clusters using {config_manager.get_model()}...")
+                print(
+                    f"Labelling {used_k} clusters using {config_manager.get_model()}...")
 
-            clusters_to_process = []
-            print("Preparing cluster metadata...")
+                clusters_to_process = []
+                print("Preparing cluster metadata...")
 
-            for i in range(used_k):
-                # Extract cluster points from original dataframe
-                # labels numpy array matches df rows
-                if labels is None:  # Should not happen if not cached
-                    continue
+                for i in range(used_k):
+                    # Extract cluster points from original dataframe
+                    # labels numpy array matches df rows
+                    if labels is None:  # Should not happen if not cached
+                        continue
 
-                cluster_mask = (labels == i)
-                cluster_df = df[cluster_mask]
+                    cluster_mask = (labels == i)
+                    cluster_df = df[cluster_mask]
 
-                if cluster_df.empty:
-                    continue
+                    if cluster_df.empty:
+                        continue
 
-                # Prepare text metadata from title and tags
-                # Limit to top 50 points to fit in context window and save
-                # tokens
-                text_metadata = []
-                for _, row in cluster_df.head(50).iterrows():
-                    parts = []
-                    if pd.notna(
-                            row.get('title')) and str(
-                            row['title']).strip():
-                        parts.append(str(row['title']))
-                    if pd.notna(row.get('tags')) and str(row['tags']).strip():
-                        # Tags are often space separated in Flickr
-                        parts.append(str(row['tags']))
+                    # Prepare text metadata from title and tags
+                    # Limit to top 50 points to fit in context window and save
+                    # tokens
+                    text_metadata = []
+                    for _, row in cluster_df.head(50).iterrows():
+                        parts = []
+                        if pd.notna(
+                                row.get('title')) and str(
+                                row['title']).strip():
+                            parts.append(str(row['title']))
+                        if pd.notna(row.get('tags')) and str(row['tags']).strip():
+                            # Tags are often space separated in Flickr
+                            parts.append(str(row['tags']))
 
-                    if parts:
-                        text_metadata.append(" ".join(parts))
+                        if parts:
+                            text_metadata.append(" ".join(parts))
 
-                # Clean text before sending to LLM
-                text_metadata = clean_text_list(text_metadata)
+                    # Clean text before sending to LLM
+                    text_metadata = clean_text_list(text_metadata)
 
-                # Fallback if no text data
-                if not text_metadata:
-                    text_metadata = ["No description available"]
+                    # Fallback if no text data
+                    if not text_metadata:
+                        text_metadata = ["No description available"]
 
-                # Construct metadata object
-                cluster_meta = {
-                    "cluster_id": f"cluster_{i}",
-                    "image_ids": [str(x) for x in cluster_df.index[:10]],
-                    "text_metadata": text_metadata,  # Service handles joining
-                    "cluster_size": len(cluster_df)
-                }
-                clusters_to_process.append(cluster_meta)
+                    # Construct metadata object
+                    cluster_meta = {
+                        "cluster_id": f"cluster_{i}",
+                        "image_ids": [str(x) for x in cluster_df.index[:10]],
+                        "text_metadata": text_metadata,  # Service handles joining
+                        "cluster_size": len(cluster_df)
+                    }
+                    clusters_to_process.append(cluster_meta)
 
-            # Process in batches
-            # Use a reasonable number of workers (e.g., 5 or 10) to allow concurrent processing
-            # while the rate limiter imposes the speed limit.
-            results = labeling_service.process_batch(
-                clusters_to_process, MAX_LABELING_WORKERS)
-            llm_labels.update(results)
+                # Process in batches
+                # Use a reasonable number of workers (e.g., 5 or 10) to allow concurrent processing
+                # while the rate limiter imposes the speed limit.
+                results = labeling_service.process_batch(
+                    clusters_to_process, MAX_LABELING_WORKERS)
+                llm_labels.update(results)
 
-            # Fill in missing labels
-            for i in range(used_k):
-                if i not in llm_labels:
+                # Fill in missing labels
+                for i in range(used_k):
+                    if i not in llm_labels:
+                        llm_labels[i] = f"Cluster {i}"
+
+                # Save to Cache
+                if USE_CACHE:
+                    print("Saving results to cache...")
+                    db_manager.save_run(
+                        clustering_params,
+                        dataset_signature,
+                        clustered_points,
+                        llm_labels)
+
+            except Exception as e:
+                print(f"LLM Labeling skipped or failed: {e}")
+                # Prepare default labels if LLM fails
+                for i in range(used_k):
                     llm_labels[i] = f"Cluster {i}"
-
-            # Save to Cache
-            if USE_CACHE:
-                print("Saving results to cache...")
-                db_manager.save_run(
-                    clustering_params,
-                    dataset_signature,
-                    clustered_points,
-                    llm_labels)
-
-        except Exception as e:
-            print(f"LLM Labeling skipped or failed: {e}")
+        else:
+            print("\nWarning: 'openai' library not found. Skipping LLM Labeling. Default labels will be used.")
             # Prepare default labels if LLM fails
             for i in range(used_k):
                 llm_labels[i] = f"Cluster {i}"
 
     if TEST_CLUSTERS:
+        if not HAS_MATPLOTLIB:
+            print("\nError: 'matplotlib' is required for TEST_CLUSTERS visualisation.")
+            sys.exit(1)
+
         # Use matplotlib for faster visualisation
         plot_clusters(clustered_points)
 
@@ -225,6 +241,10 @@ def main():
         sys.exit(0)
 
     if TEST_HULLS:
+        if not HAS_MATPLOTLIB:
+            print("\nError: 'matplotlib' is required for TEST_HULLS visualisation.")
+            sys.exit(1)
+
         if cached_run_id:
             print(
                 "Warning: Skipping TEST_HULLS because data was loaded from cache (labels array incomplete).")
@@ -325,49 +345,53 @@ def main():
 
             sys.exit(0)
 
-    vis = Visualisation()
+    if HAS_FOLIUM:
+        vis = Visualisation()
 
-    if ADD_POINTS:
-        if cached_run_id:
-            print("Warning: Noise points cannot be accurately displayed when loading from cache (re-run logic required).")
-        else:
-            # Only add noise points (label -1) to the map
-            noise_mask = labels == -1
-            noise_points = df[noise_mask]
-            print(f"Adding {len(noise_points)} noise points to map...")
-            for _, row in noise_points.iterrows():
-                vis.draw_point(row)
+        if ADD_POINTS:
+            if cached_run_id:
+                print("Warning: Noise points cannot be accurately displayed when loading from cache (re-run logic required).")
+            else:
+                # Only add noise points (label -1) to the map
+                noise_mask = labels == -1
+                noise_points = df[noise_mask]
+                print(f"Adding {len(noise_points)} noise points to map...")
+                for _, row in noise_points.iterrows():
+                    vis.draw_point(row)
 
-    print("Computing cluster hulls...")
-    hulls = compute_cluster_hulls(
-        clustered_points,
-        alpha=ALPHA_VALUE,
-        auto_alpha_quantile=ALPHA_QUANTILE)
+        print("Computing cluster hulls...")
+        hulls = compute_cluster_hulls(
+            clustered_points,
+            alpha=ALPHA_VALUE,
+            auto_alpha_quantile=ALPHA_QUANTILE)
 
-    print(f"Adding {len(hulls)} hulls to map...")
-    for i, hull in enumerate(hulls):
-        # Retrieve label for this cluster
-        label_text = llm_labels.get(i, f"Cluster {i}")
+        print(f"Adding {len(hulls)} hulls to map...")
+        for i, hull in enumerate(hulls):
+            # Retrieve label for this cluster
+            label_text = llm_labels.get(i, f"Cluster {i}")
 
-        for poly_points in hull:
-            vis.draw_cluster(poly_points, popup=label_text, tooltip=label_text)
+            for poly_points in hull:
+                vis.draw_cluster(poly_points, popup=label_text, tooltip=label_text)
 
-    print("Generating output map 'output_map.html'...")
-    # Compute optimized extremes from dataframe for bounds if possible
-    try:
-        min_lat = df["latitude"].min()
-        max_lat = df["latitude"].max()
-        min_lon = df["longitude"].min()
-        max_lon = df["longitude"].max()
-        bounds = [[min_lat, min_lon], [max_lat, max_lon]]
-    except Exception:
-        bounds = None
+        print("Generating output map 'output_map.html'...")
+        # Compute optimized extremes from dataframe for bounds if possible
+        try:
+            min_lat = df["latitude"].min()
+            max_lat = df["latitude"].max()
+            min_lon = df["longitude"].min()
+            max_lon = df["longitude"].max()
+            bounds = [[min_lat, min_lon], [max_lat, max_lon]]
+        except Exception:
+            bounds = None
 
-    vis.create_map("output_map.html", bounds=bounds)
+        vis.create_map("output_map.html", bounds=bounds)
 
-    if AUTO_OPEN_BROWSER:
-        print("Opening map in web browser...")
-        webbrowser.open("output_map.html")
+        if AUTO_OPEN_BROWSER:
+            print("Opening map in web browser...")
+            webbrowser.open("output_map.html")
+    else:
+        print("\n[!] Warning: 'folium' library not found. Skipping interactive map generation.")
+        print("    Standard clustering and hulls will still be computed and cached.")
 
     print("--- Done ---")
 

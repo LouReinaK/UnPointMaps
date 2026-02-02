@@ -1,25 +1,52 @@
 # remove non-significant words from text data
 import pandas as pd
-from nltk.corpus import stopwords
-from nltk.tokenize import word_tokenize
+try:
+    from nltk.corpus import stopwords
+    from nltk.tokenize import word_tokenize
+except ImportError:
+    stopwords = None
+    word_tokenize = None
 from .TFIDF import get_top_keywords
-from langdetect import detect, DetectorFactory
+try:
+    from langdetect import detect, DetectorFactory
+except ImportError:
+    detect = None
+    DetectorFactory = None
 from collections import Counter
+from functools import lru_cache
+
+# Lazy database manager instance
+_DB_MANAGER = None
+
+def get_db_manager():
+    """Returns the database manager instance, initializing it if necessary."""
+    global _DB_MANAGER
+    if _DB_MANAGER is None:
+        try:
+            from ..database.manager import DatabaseManager
+            _DB_MANAGER = DatabaseManager()
+        except Exception:
+            return None
+    return _DB_MANAGER
 
 # Pour avoir des résultats reproductibles
-DetectorFactory.seed = 0
+if DetectorFactory:
+    DetectorFactory.seed = 0
 
 # Dictionnaire des stopwords pour différentes langues
-STOPWORDS_DICT = {
-    'french': set(stopwords.words('french')),
-    'english': set(stopwords.words('english')),
-    'spanish': set(stopwords.words('spanish')),
-    'german': set(stopwords.words('german')),
-    'italian': set(stopwords.words('italian')),
-    'portuguese': set(stopwords.words('portuguese')),
-    'russian': set(stopwords.words('russian')),
-    'dutch': set(stopwords.words('dutch')),
-}
+try:
+    STOPWORDS_DICT = {
+        'french': set(stopwords.words('french')),
+        'english': set(stopwords.words('english')),
+        'spanish': set(stopwords.words('spanish')),
+        'german': set(stopwords.words('german')),
+        'italian': set(stopwords.words('italian')),
+        'portuguese': set(stopwords.words('portuguese')),
+        'russian': set(stopwords.words('russian')),
+        'dutch': set(stopwords.words('dutch')),
+    } if stopwords else {}
+except Exception:
+    STOPWORDS_DICT = {}
 
 # Mapping langdetect codes to NLTK language names
 LANGUAGE_MAPPING = {
@@ -40,8 +67,11 @@ def get_stopwords_for_language(lang_code):
     return STOPWORDS_DICT.get(lang_name, STOPWORDS_DICT['english'])
 
 
+@lru_cache(maxsize=10000)
 def detect_language(text):
     """Détecte la langue d'un texte"""
+    if detect is None:
+        return 'en'
     try:
         if pd.isna(text) or text == '':
             return 'en'
@@ -51,19 +81,21 @@ def detect_language(text):
         return 'en'  # Par défaut, anglais
 
 
-def remove_nonsignificant_words_multilang(text):
-    """Supprime les stopwords basés sur la langue détectée"""
+@lru_cache(maxsize=10000)
+def _remove_nonsignificant_words_multilang_internal(text):
+    """Internal function for cleaning a single string, with LRU cache."""
     try:
         if pd.isna(text) or text == '':
             return ''
+
+        if word_tokenize is None:
+            return text
 
         text_str = str(text)
         lang = detect_language(text_str)
         stop_words = get_stopwords_for_language(lang)
 
         # Tokenize the text
-        # Tokenization par défaut
-        # Get language name for word_tokenize
         lang_name = LANGUAGE_MAPPING.get(lang, 'french')
         words = word_tokenize(text_str, language=lang_name)
         # Remove stop words
@@ -75,11 +107,61 @@ def remove_nonsignificant_words_multilang(text):
         return text
 
 
+def remove_nonsignificant_words_multilang(text):
+    """Supprime les stopwords basés sur la langue détectée (avec cache LRU)"""
+    return _remove_nonsignificant_words_multilang_internal(text)
+
+
+def clean_texts_batched(texts):
+    """
+    Cleans a list of texts using batch DB lookups and LRU cache for maximum speed.
+    """
+    if not texts:
+        return []
+
+    # Map inputs to unique non-empty strings
+    original_texts = [str(t) if not pd.isna(t) else "" for t in texts]
+    unique_texts = list(set(t for t in original_texts if t.strip()))
+    
+    if not unique_texts:
+        return original_texts
+
+    db = get_db_manager()
+    cached_results = {}
+    
+    # 1. Try DB cache first
+    if db:
+        try:
+            cached_results = db.get_cleaned_text_batch(unique_texts)
+        except Exception:
+            cached_results = {}
+    
+    # 2. Process what's missing
+    to_process = [t for t in unique_texts if t not in cached_results]
+    new_results = {}
+    
+    for t in to_process:
+        cleaned = _remove_nonsignificant_words_multilang_internal(t)
+        new_results[t] = cleaned
+        cached_results[t] = cleaned
+        
+    # 3. Save new results to DB
+    if db and new_results:
+        try:
+            db.save_cleaned_text_batch(new_results)
+        except Exception:
+            pass
+            
+    # Reconstruct the list in original order
+    return [cached_results.get(t, t) if t else "" for t in original_texts]
+
+
 def process_text_columns(df, text_columns):
-    """Traite les colonnes de texte en supprimant les stopwords multilingues"""
+    """Traite les colonnes de texte en supprimant les stopwords multilingues (version optimisée)"""
     for col in text_columns:
-        df[col] = df[col].astype(str).apply(
-            remove_nonsignificant_words_multilang)
+        if col in df.columns:
+            texts = df[col].astype(str).tolist()
+            df[col] = clean_texts_batched(texts)
     return df
 
 
@@ -97,25 +179,28 @@ def langues_detectees(df, n=5000):
 
 def clean_text_list(texts):
     """
-    Takes a list of strings, cleans them using remove_nonsignificant_words_multilang,
+    Takes a list of strings, cleans them using batch processing,
     and returns the cleaned list.
     """
-    cleaned = []
-    for t in texts:
-        c = remove_nonsignificant_words_multilang(t)
-        if c and c.strip():
-            cleaned.append(c)
-    return cleaned
+    if not texts:
+        return []
+    cleaned_full = clean_texts_batched(texts)
+    # Filter out empty results as original behavior did
+    return [c for c in cleaned_full if c and c.strip()]
 
 
 #Supprimer les mots fréquents dans le dataset qui ne sont pas des stopwords ou des mots significatifs
 def clean_df_words(df, threshold=0.5):
-    texts = (
-        df['title'].dropna().astype(str).tolist()
-        + df['tags'].dropna().astype(str).tolist()
-    )
-    # Clean each text individually
-    cleaned_texts = [remove_nonsignificant_words_multilang(t) for t in texts]
+    # Collect all texts to clean in one batch
+    texts_to_clean = []
+    if 'title' in df.columns:
+        texts_to_clean.extend(df['title'].dropna().astype(str).tolist())
+    if 'tags' in df.columns:
+        texts_to_clean.extend(df['tags'].dropna().astype(str).tolist())
+    
+    # Process everything in one batch
+    cleaned_texts = clean_texts_batched(texts_to_clean)
+    
     frequent_words = get_top_keywords(cleaned_texts, top_n=3)
     # Supprimer les mots fréquents du dataset
     df = df.map(lambda x: ' '.join(

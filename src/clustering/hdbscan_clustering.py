@@ -1,7 +1,10 @@
 from typing import List, Tuple, Optional, Any
 import multiprocessing
 import numpy as np
-import hdbscan
+try:
+    import hdbscan
+except ImportError:
+    hdbscan = None
 
 # Worker function must be top-level for multiprocessing pickling
 
@@ -15,6 +18,10 @@ def _hdbscan_worker(
     max_std_dev: float,
     output_queue: multiprocessing.Queue
 ):
+    if hdbscan is None:
+        output_queue.put(("error", "hdbscan library is not installed. HDBSCAN clustering is unavailable."))
+        return
+
     try:
         # Initialize labels array with -1 (noise)
         final_labels = np.full(len(points_array), -1, dtype=int)

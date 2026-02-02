@@ -3,11 +3,19 @@
 # euclidienne et on cherchera le meilleur k
 from typing import List, Tuple, Any
 import numpy as np
-import matplotlib.pyplot as plt
+try:
+    import matplotlib.pyplot as plt
+except ImportError:
+    plt = None
 from scipy.spatial import ConvexHull
-from sklearn.cluster import KMeans
-from sklearn.neighbors import NearestNeighbors
-from sklearn.metrics import silhouette_score
+try:
+    from sklearn.cluster import KMeans
+    from sklearn.neighbors import NearestNeighbors
+    from sklearn.metrics import silhouette_score
+except ImportError:
+    KMeans = None
+    NearestNeighbors = None
+    silhouette_score = None
 from ..processing.dataset_filtering import convert_to_dict_filtered
 
 
@@ -27,6 +35,8 @@ def find_optimal_k_elbow(
     """
         Trouve le k optimal en utilisant la méthode du coude (Elbow method)
     """
+    if KMeans is None:
+        raise ImportError("scikit-learn is required for KMeans clustering.")
     inertias = []
     k_values = list(k_range)
 
@@ -53,6 +63,9 @@ def find_optimal_k_silhouette(
     """
         Trouve le k optimal en utilisant le score de silhouette
     """
+    if KMeans is None or silhouette_score is None:
+        raise ImportError("scikit-learn is required for KMeans clustering and silhouette score.")
+
     silhouette_scores = []
     k_values = list(k_range)
 
@@ -73,6 +86,8 @@ def kmeans_clustering(dataset: Any, k: int | None = None,
         Fonction principale de clustering avec k-means
         peut trouver le k optimal avec la méthode du coude ou du score de silhouette si k n'est pas fourni
     """
+    if KMeans is None:
+        raise ImportError("scikit-learn is required for KMeans clustering.")
 
     # Préparation des données pour scikit-learn
     if hasattr(dataset, 'iloc'):  # pandas DataFrame
@@ -135,6 +150,8 @@ def plot_k_distance(data, k):
 
     # We need k neighbors. NearestNeighbors includes the point itself as the first neighbor (dist=0)
     # So we ask for k neighbors.
+    if NearestNeighbors is None:
+        raise ImportError("scikit-learn is required for parameter checking.")
     neighbors = NearestNeighbors(n_neighbors=k)
     neighbors_fit = neighbors.fit(points)
     distances, _ = neighbors_fit.kneighbors(points)

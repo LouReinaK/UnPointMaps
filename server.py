@@ -12,13 +12,19 @@ import re
 import requests
 import pandas as pd
 import numpy as np
-from fastapi.responses import HTMLResponse
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
-from fastapi.staticfiles import StaticFiles
-from fastapi.middleware.cors import CORSMiddleware
-import uvicorn
+
+try:
+    from fastapi.responses import HTMLResponse
+    from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+    from fastapi.staticfiles import StaticFiles
+    from fastapi.middleware.cors import CORSMiddleware
+    import uvicorn
+    HAS_SERVER_LIBS = True
+except ImportError:
+    HAS_SERVER_LIBS = False
 
 # Project imports
+from src.utils.dependency_utils import HAS_HDBSCAN, HAS_OPENAI, HAS_FOLIUM, HAS_MATPLOTLIB
 from src.processing.embedding_service import EmbeddingService
 from src.processing.dataset_filtering import convert_to_dict_filtered
 from src.processing.time_filtering import TimeFilter
@@ -1083,4 +1089,8 @@ async def websocket_endpoint(websocket: WebSocket):
         app_state.active_websockets.remove(websocket)
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="localhost", port=8000)
+    if not HAS_SERVER_LIBS:
+        print("Error: 'fastapi' or 'uvicorn' libraries are missing. Cannot start server.")
+        print("Please install them with: pip install fastapi uvicorn")
+    else:
+        uvicorn.run(app, host="localhost", port=8000)

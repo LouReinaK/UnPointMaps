@@ -1,5 +1,8 @@
 import pandas as pd
-import matplotlib.pyplot as plt
+try:
+    import matplotlib.pyplot as plt
+except ImportError:
+    plt = None
 import os
 from datetime import datetime
 from dotenv import load_dotenv
@@ -21,6 +24,10 @@ def analyze_timestamps(df: Optional[pd.DataFrame] = None):
     If df is provided, uses it. Only expects 'date' and optionally 'hour', 'date_taken_hour' columns.
     If df is None, tries to load from file.
     """
+    if plt is None:
+        print("Error: 'matplotlib' library is missing. Cannot generate temporal analysis plots. Please install it with 'pip install matplotlib'.")
+        return
+
     if df is None:
         load_dotenv()
         file_path = 'flickr_data2.csv'
