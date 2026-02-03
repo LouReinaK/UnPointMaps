@@ -67,7 +67,7 @@ def filter_dataset(df):
 
     # Remove frequent non-stopwords (e.g. 'lyon') using pipeline
     # Remove only the top 6 most frequent non-stopwords to limit removals
-    df, removed_words = remove_common_words_pipeline(df, top_n=7, min_freq=50)
+    df, removed_words = remove_common_words_pipeline(df, top_n=8, min_freq=50)
     if removed_words:
         print(f"Mots fréquents supprimés: {', '.join(removed_words)}")
 
